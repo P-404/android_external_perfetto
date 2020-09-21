@@ -23,6 +23,8 @@
 #include "perfetto/base/time.h"
 #include "perfetto/ext/base/string_splitter.h"
 #include "perfetto/ext/base/string_utils.h"
+#include "src/trace_processor/dynamic/ancestor_slice_generator.h"
+#include "src/trace_processor/dynamic/descendant_slice_generator.h"
 #include "src/trace_processor/dynamic/describe_slice_generator.h"
 #include "src/trace_processor/dynamic/experimental_counter_dur_generator.h"
 #include "src/trace_processor/dynamic/experimental_flamegraph_generator.h"
@@ -37,6 +39,7 @@
 #include "src/trace_processor/importers/json/json_trace_tokenizer.h"
 #include "src/trace_processor/importers/proto/metadata_tracker.h"
 #include "src/trace_processor/importers/systrace/systrace_trace_parser.h"
+#include "src/trace_processor/iterator_impl.h"
 #include "src/trace_processor/sqlite/span_join_operator_table.h"
 #include "src/trace_processor/sqlite/sql_stats_table.h"
 #include "src/trace_processor/sqlite/sqlite3_str_split.h"
@@ -52,6 +55,7 @@
 #include "protos/perfetto/trace/trace.pbzero.h"
 #include "protos/perfetto/trace/trace_packet.pbzero.h"
 
+#include "src/trace_processor/metrics/chrome/all_chrome_metrics.descriptor.h"
 #include "src/trace_processor/metrics/metrics.descriptor.h"
 #include "src/trace_processor/metrics/metrics.h"
 #include "src/trace_processor/metrics/sql_metrics.h"
@@ -126,6 +130,14 @@ void CreateBuiltinTables(sqlite3* db) {
   sqlite3_exec(db,
                "CREATE TABLE trace_bounds(start_ts BIG INT, end_ts BIG INT)", 0,
                0, &error);
+  if (error) {
+    PERFETTO_ELOG("Error initializing: %s", error);
+    sqlite3_free(error);
+  }
+  sqlite3_exec(db,
+               "CREATE TABLE power_profile"
+               "(device STRING, cpu INT, cluster INT, freq INT, power DOUBLE);",
+               0, 0, &error);
   if (error) {
     PERFETTO_ELOG("Error initializing: %s", error);
     sqlite3_free(error);
@@ -315,6 +327,10 @@ void Demangle(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
     return;
   }
   sqlite3_value* value = argv[0];
+  if (sqlite3_value_type(value) == SQLITE_NULL) {
+    sqlite3_result_null(ctx);
+    return;
+  }
   if (sqlite3_value_type(value) != SQLITE_TEXT) {
     sqlite3_result_error(ctx, "Unsupported type of arg passed to DEMANGLE", -1);
     return;
@@ -410,6 +426,93 @@ void CreateLastNonNullFunction(sqlite3* db) {
   }
 }
 
+struct ValueAtMaxTsContext {
+  bool initialized;
+  int value_type;
+
+  int64_t max_ts;
+  int64_t int_value_at_max_ts;
+  double double_value_at_max_ts;
+};
+
+void ValueAtMaxTsStep(sqlite3_context* ctx, int, sqlite3_value** argv) {
+  sqlite3_value* ts = argv[0];
+  sqlite3_value* value = argv[1];
+
+  // Note that sqlite3_aggregate_context zeros the memory for us so all the
+  // variables of the struct should be zero.
+  ValueAtMaxTsContext* fn_ctx = reinterpret_cast<ValueAtMaxTsContext*>(
+      sqlite3_aggregate_context(ctx, sizeof(ValueAtMaxTsContext)));
+
+  // For performance reasons, we only do the check for the type of ts and value
+  // on the first call of the function.
+  if (PERFETTO_UNLIKELY(!fn_ctx->initialized)) {
+    if (sqlite3_value_type(ts) != SQLITE_INTEGER) {
+      sqlite3_result_error(ctx, "VALUE_AT_MAX_TS: ts passed was not an integer",
+                           -1);
+      return;
+    }
+
+    fn_ctx->value_type = sqlite3_value_type(value);
+    if (fn_ctx->value_type != SQLITE_INTEGER &&
+        fn_ctx->value_type != SQLITE_FLOAT) {
+      sqlite3_result_error(
+          ctx, "VALUE_AT_MAX_TS: value passed was not an integer or float", -1);
+      return;
+    }
+
+    fn_ctx->initialized = true;
+  }
+
+  // On dcheck builds however, we check every passed ts and value.
+#if PERFETTO_DCHECK_IS_ON()
+  if (sqlite3_value_type(ts) != SQLITE_INTEGER) {
+    sqlite3_result_error(ctx, "VALUE_AT_MAX_TS: ts passed was not an integer",
+                         -1);
+    return;
+  }
+  if (sqlite3_value_type(value) != fn_ctx->value_type) {
+    sqlite3_result_error(ctx, "VALUE_AT_MAX_TS: value type is inconsistent",
+                         -1);
+    return;
+  }
+#endif
+
+  int64_t ts_int = sqlite3_value_int64(ts);
+  if (PERFETTO_LIKELY(fn_ctx->max_ts < ts_int)) {
+    fn_ctx->max_ts = ts_int;
+
+    if (fn_ctx->value_type == SQLITE_INTEGER) {
+      fn_ctx->int_value_at_max_ts = sqlite3_value_int64(value);
+    } else {
+      fn_ctx->double_value_at_max_ts = sqlite3_value_double(value);
+    }
+  }
+}
+
+void ValueAtMaxTsFinal(sqlite3_context* ctx) {
+  ValueAtMaxTsContext* fn_ctx =
+      reinterpret_cast<ValueAtMaxTsContext*>(sqlite3_aggregate_context(ctx, 0));
+  if (!fn_ctx) {
+    sqlite3_result_null(ctx);
+    return;
+  }
+  if (fn_ctx->value_type == SQLITE_INTEGER) {
+    sqlite3_result_int64(ctx, fn_ctx->int_value_at_max_ts);
+  } else {
+    sqlite3_result_double(ctx, fn_ctx->double_value_at_max_ts);
+  }
+}
+
+void CreateValueAtMaxTsFunction(sqlite3* db) {
+  auto ret = sqlite3_create_function_v2(
+      db, "VALUE_AT_MAX_TS", 2, SQLITE_UTF8 | SQLITE_DETERMINISTIC, nullptr,
+      nullptr, &ValueAtMaxTsStep, &ValueAtMaxTsFinal, nullptr);
+  if (ret) {
+    PERFETTO_ELOG("Error initializing VALUE_AT_MAX_TS");
+  }
+}
+
 void ExtractArg(sqlite3_context* ctx, int argc, sqlite3_value** argv) {
   if (argc != 2) {
     sqlite3_result_error(ctx, "EXTRACT_ARG: 2 args required", -1);
@@ -471,10 +574,25 @@ void CreateExtractArgFunction(TraceStorage* ts, sqlite3* db) {
   }
 }
 
+void CreateSourceGeqFunction(sqlite3* db) {
+  auto fn = [](sqlite3_context* ctx, int, sqlite3_value**) {
+    sqlite3_result_error(
+        ctx, "SOURCE_GEQ should not be called from the global scope", -1);
+  };
+  auto ret = sqlite3_create_function_v2(db, "SOURCE_GEQ", -1,
+                                        SQLITE_UTF8 | SQLITE_DETERMINISTIC,
+                                        nullptr, fn, nullptr, nullptr, nullptr);
+  if (ret != SQLITE_OK) {
+    PERFETTO_FATAL("Error initializing SOURCE_GEQ: %s", sqlite3_errmsg(db));
+  }
+}
+
 void SetupMetrics(TraceProcessor* tp,
                   sqlite3* db,
                   std::vector<metrics::SqlMetricFile>* sql_metrics) {
   tp->ExtendMetricsProto(kMetricsDescriptor.data(), kMetricsDescriptor.size());
+  tp->ExtendMetricsProto(kAllChromeMetricsDescriptor.data(),
+                         kAllChromeMetricsDescriptor.size());
 
   for (const auto& file_to_sql : metrics::sql_metrics::kFileToSql) {
     tp->RegisterMetric(file_to_sql.path, file_to_sql.sql);
@@ -490,7 +608,7 @@ void SetupMetrics(TraceProcessor* tp,
         nullptr, nullptr,
         [](void* ptr) { delete static_cast<metrics::RunMetricContext*>(ptr); });
     if (ret)
-      PERFETTO_ELOG("Error initializing RUN_METRIC");
+      PERFETTO_FATAL("Error initializing RUN_METRIC");
   }
 
   {
@@ -498,7 +616,15 @@ void SetupMetrics(TraceProcessor* tp,
         db, "RepeatedField", 1, SQLITE_UTF8, nullptr, nullptr,
         metrics::RepeatedFieldStep, metrics::RepeatedFieldFinal, nullptr);
     if (ret)
-      PERFETTO_ELOG("Error initializing RepeatedField");
+      PERFETTO_FATAL("Error initializing RepeatedField");
+  }
+
+  {
+    auto ret = sqlite3_create_function_v2(db, "NULL_IF_EMPTY", 1, SQLITE_UTF8,
+                                          nullptr, metrics::NullIfEmpty,
+                                          nullptr, nullptr, nullptr);
+    if (ret)
+      PERFETTO_FATAL("Error initializing NULL_IF_EMPTY");
   }
 }
 
@@ -542,6 +668,8 @@ TraceProcessorImpl::TraceProcessorImpl(const Config& cfg)
   CreateDemangledNameFunction(db);
   CreateLastNonNullFunction(db);
   CreateExtractArgFunction(context_.storage.get(), db);
+  CreateSourceGeqFunction(db);
+  CreateValueAtMaxTsFunction(db);
 
   SetupMetrics(this, *db_, &sql_metrics_);
 
@@ -571,6 +699,10 @@ TraceProcessorImpl::TraceProcessorImpl(const Config& cfg)
       new ExperimentalSliceLayoutGenerator(
           context_.storage.get()->mutable_string_pool(),
           &storage->slice_table())));
+  RegisterDynamicTable(std::unique_ptr<AncestorSliceGenerator>(
+      new AncestorSliceGenerator(&context_)));
+  RegisterDynamicTable(std::unique_ptr<DescendantSliceGenerator>(
+      new DescendantSliceGenerator(&context_)));
 
   // New style db-backed tables.
   RegisterDbTable(storage->arg_table());
@@ -605,6 +737,7 @@ TraceProcessorImpl::TraceProcessorImpl(const Config& cfg)
   RegisterDbTable(storage->symbol_table());
   RegisterDbTable(storage->heap_profile_allocation_table());
   RegisterDbTable(storage->cpu_profile_stack_sample_table());
+  RegisterDbTable(storage->perf_sample_table());
   RegisterDbTable(storage->stack_profile_callsite_table());
   RegisterDbTable(storage->stack_profile_mapping_table());
   RegisterDbTable(storage->stack_profile_frame_table());
@@ -622,10 +755,7 @@ TraceProcessorImpl::TraceProcessorImpl(const Config& cfg)
   RegisterDbTable(storage->cpu_freq_table());
 }
 
-TraceProcessorImpl::~TraceProcessorImpl() {
-  for (auto* it : iterators_)
-    it->Reset();
-}
+TraceProcessorImpl::~TraceProcessorImpl() = default;
 
 util::Status TraceProcessorImpl::Parse(std::unique_ptr<uint8_t[]> data,
                                        size_t size) {
@@ -697,9 +827,8 @@ size_t TraceProcessorImpl::RestoreInitialTables() {
   return deletion_list.size();
 }
 
-TraceProcessor::Iterator TraceProcessorImpl::ExecuteQuery(
-    const std::string& sql,
-    int64_t time_queued) {
+Iterator TraceProcessorImpl::ExecuteQuery(const std::string& sql,
+                                          int64_t time_queued) {
   sqlite3_stmt* raw_stmt;
   int err;
   {
@@ -723,8 +852,7 @@ TraceProcessor::Iterator TraceProcessorImpl::ExecuteQuery(
 
   std::unique_ptr<IteratorImpl> impl(new IteratorImpl(
       this, *db_, ScopedStmt(raw_stmt), col_count, status, sql_stats_row));
-  iterators_.emplace_back(impl.get());
-  return TraceProcessor::Iterator(std::move(impl));
+  return Iterator(std::move(impl));
 }
 
 void TraceProcessorImpl::InterruptQuery() {
@@ -844,43 +972,6 @@ util::Status TraceProcessorImpl::DisableAndReadMetatrace(
   });
   *trace_proto = trace.SerializeAsArray();
   return util::OkStatus();
-}
-
-TraceProcessor::IteratorImpl::IteratorImpl(TraceProcessorImpl* trace_processor,
-                                           sqlite3* db,
-                                           ScopedStmt stmt,
-                                           uint32_t column_count,
-                                           util::Status status,
-                                           uint32_t sql_stats_row)
-    : trace_processor_(trace_processor),
-      db_(db),
-      stmt_(std::move(stmt)),
-      column_count_(column_count),
-      status_(status),
-      sql_stats_row_(sql_stats_row) {}
-
-TraceProcessor::IteratorImpl::~IteratorImpl() {
-  if (trace_processor_) {
-    auto* its = &trace_processor_->iterators_;
-    auto it = std::find(its->begin(), its->end(), this);
-    PERFETTO_CHECK(it != its->end());
-    its->erase(it);
-
-    base::TimeNanos t_end = base::GetWallTimeNs();
-    auto* sql_stats = trace_processor_->context_.storage->mutable_sql_stats();
-    sql_stats->RecordQueryEnd(sql_stats_row_, t_end.count());
-  }
-}
-
-void TraceProcessor::IteratorImpl::Reset() {
-  *this = IteratorImpl(nullptr, nullptr, ScopedStmt(), 0,
-                       util::ErrStatus("Trace processor was deleted"), 0);
-}
-
-void TraceProcessor::IteratorImpl::RecordFirstNextInSqlStats() {
-  base::TimeNanos t_first_next = base::GetWallTimeNs();
-  auto* sql_stats = trace_processor_->context_.storage->mutable_sql_stats();
-  sql_stats->RecordQueryFirstNext(sql_stats_row_, t_first_next.count());
 }
 
 }  // namespace trace_processor

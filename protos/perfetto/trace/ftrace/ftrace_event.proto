@@ -44,11 +44,13 @@ import "protos/perfetto/trace/ftrace/power.proto";
 import "protos/perfetto/trace/ftrace/raw_syscalls.proto";
 import "protos/perfetto/trace/ftrace/regulator.proto";
 import "protos/perfetto/trace/ftrace/sched.proto";
+import "protos/perfetto/trace/ftrace/scm.proto";
 import "protos/perfetto/trace/ftrace/sde.proto";
 import "protos/perfetto/trace/ftrace/signal.proto";
 import "protos/perfetto/trace/ftrace/sync.proto";
 import "protos/perfetto/trace/ftrace/systrace.proto";
 import "protos/perfetto/trace/ftrace/task.proto";
+import "protos/perfetto/trace/ftrace/thermal.proto";
 import "protos/perfetto/trace/ftrace/vmscan.proto";
 import "protos/perfetto/trace/ftrace/workqueue.proto";
 import "protos/perfetto/trace/ftrace/generic.proto";
@@ -418,6 +420,10 @@ message FtraceEvent {
     IonStatFtraceEvent ion_stat = 335;
     IonBufferCreateFtraceEvent ion_buffer_create = 336;
     IonBufferDestroyFtraceEvent ion_buffer_destroy = 337;
+    ScmCallStartFtraceEvent scm_call_start = 338;
+    ScmCallEndFtraceEvent scm_call_end = 339;
     GpuMemTotalFtraceEvent gpu_mem_total = 340;
+    ThermalTemperatureFtraceEvent thermal_temperature = 341;
+    CdevUpdateFtraceEvent cdev_update = 342;
   }
 }

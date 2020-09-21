@@ -47,6 +47,7 @@ import {postMessageHandler} from './post_message_handler';
 import {RecordPage, updateAvailableAdbDevices} from './record_page';
 import {Router} from './router';
 import {CheckHttpRpcConnection} from './rpc_http_dialog';
+import {TraceInfoPage} from './trace_info_page';
 import {ViewerPage} from './viewer_page';
 
 const EXTENSION_ID = 'lfmkphfpdbjijhpomgecfikhfohaoine';
@@ -182,6 +183,11 @@ class FrontendApi {
     this.redraw();
   }
 
+  publishTraceErrors(numErrors: number) {
+    globals.setTraceErrors(numErrors);
+    this.redraw();
+  }
+
   publishAggregateData(args: {data: AggregateData, kind: string}) {
     globals.setAggregateData(args.kind, args.data);
     this.redraw();
@@ -254,7 +260,8 @@ function main() {
         '/': HomePage,
         '/viewer': ViewerPage,
         '/record': RecordPage,
-        '/analyze': AnalyzePage,
+        '/query': AnalyzePage,
+        '/info': TraceInfoPage,
       },
       dispatch);
   forwardRemoteCalls(frontendChannel.port2, new FrontendApi(router));

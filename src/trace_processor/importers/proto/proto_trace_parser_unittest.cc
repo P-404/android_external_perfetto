@@ -28,6 +28,7 @@
 #include "src/trace_processor/importers/common/track_tracker.h"
 #include "src/trace_processor/importers/default_modules.h"
 #include "src/trace_processor/importers/ftrace/sched_event_tracker.h"
+#include "src/trace_processor/importers/proto/args_table_utils.h"
 #include "src/trace_processor/importers/proto/metadata_tracker.h"
 #include "src/trace_processor/importers/proto/proto_trace_parser.h"
 #include "src/trace_processor/importers/proto/stack_profile_tracker.h"
@@ -139,15 +140,20 @@ class MockProcessTracker : public ProcessTracker {
   MockProcessTracker(TraceProcessorContext* context)
       : ProcessTracker(context) {}
 
-  MOCK_METHOD3(SetProcessMetadata,
+  MOCK_METHOD4(SetProcessMetadata,
                UniquePid(uint32_t pid,
                          base::Optional<uint32_t> ppid,
-                         base::StringView process_name));
+                         base::StringView process_name,
+                         base::StringView cmdline));
 
-  MOCK_METHOD2(UpdateThreadName,
-               UniqueTid(uint32_t tid, StringId thread_name_id));
-  MOCK_METHOD2(SetThreadNameIfUnset,
-               void(UniqueTid utid, StringId thread_name_id));
+  MOCK_METHOD3(UpdateThreadName,
+               UniqueTid(uint32_t tid,
+                         StringId thread_name_id,
+                         ThreadNamePriority priority));
+  MOCK_METHOD3(UpdateThreadNameByUtid,
+               void(UniqueTid utid,
+                    StringId thread_name_id,
+                    ThreadNamePriority priority));
   MOCK_METHOD2(UpdateThread, UniqueTid(uint32_t tid, uint32_t tgid));
 
   MOCK_METHOD1(GetOrCreateProcess, UniquePid(uint32_t pid));
@@ -218,6 +224,7 @@ class ProtoTraceParserTest : public ::testing::Test {
     clock_ = new ClockTracker(&context_);
     context_.clock_tracker.reset(clock_);
     context_.sorter.reset(new TraceSorter(CreateParser(), 0 /*window size*/));
+    context_.proto_to_args_table_.reset(new ProtoToArgsTable(&context_));
 
     RegisterDefaultModules(&context_);
     RegisterAdditionalModules(&context_);
@@ -599,7 +606,8 @@ TEST_F(ProtoTraceParserTest, LoadProcessPacket) {
   process->set_ppid(3);
 
   EXPECT_CALL(*process_,
-              SetProcessMetadata(1, Eq(3u), base::StringView(kProcName1)));
+              SetProcessMetadata(1, Eq(3u), base::StringView(kProcName1),
+                                 base::StringView(kProcName1)));
   Tokenize();
 }
 
@@ -615,7 +623,8 @@ TEST_F(ProtoTraceParserTest, LoadProcessPacket_FirstCmdline) {
   process->set_ppid(3);
 
   EXPECT_CALL(*process_,
-              SetProcessMetadata(1, Eq(3u), base::StringView(kProcName1)));
+              SetProcessMetadata(1, Eq(3u), base::StringView(kProcName1),
+                                 base::StringView("proc1 proc2")));
   Tokenize();
 }
 
@@ -715,14 +724,16 @@ TEST_F(ProtoTraceParserTest, ThreadNameFromThreadDescriptor) {
       .WillRepeatedly(testing::Return(1u));
   EXPECT_CALL(*process_, UpdateThread(11, 15)).WillOnce(testing::Return(2u));
 
-  EXPECT_CALL(*process_, SetThreadNameIfUnset(
-                             1u, storage_->InternString("OldThreadName")));
+  EXPECT_CALL(*process_, UpdateThreadNameByUtid(
+                             1u, storage_->InternString("OldThreadName"),
+                             ThreadNamePriority::kTrackDescriptor));
   // Packet with same thread, but different name should update the name.
-  EXPECT_CALL(*process_, SetThreadNameIfUnset(
-                             1u, storage_->InternString("NewThreadName")));
-  EXPECT_CALL(
-      *process_,
-      SetThreadNameIfUnset(2u, storage_->InternString("DifferentThreadName")));
+  EXPECT_CALL(*process_, UpdateThreadNameByUtid(
+                             1u, storage_->InternString("NewThreadName"),
+                             ThreadNamePriority::kTrackDescriptor));
+  EXPECT_CALL(*process_, UpdateThreadNameByUtid(
+                             2u, storage_->InternString("DifferentThreadName"),
+                             ThreadNamePriority::kTrackDescriptor));
 
   Tokenize();
   context_.sorter->ExtractEventsForced();
@@ -1530,7 +1541,8 @@ TEST_F(ProtoTraceParserTest, TrackEventWithResortedCounterDescriptor) {
       .WillOnce(Return(0u));
 
   EXPECT_CALL(*process_,
-              SetThreadNameIfUnset(1u, storage_->InternString("t1")));
+              UpdateThreadNameByUtid(1u, storage_->InternString("t1"),
+                                     ThreadNamePriority::kTrackDescriptor));
 
   context_.sorter->ExtractEventsForced();
 

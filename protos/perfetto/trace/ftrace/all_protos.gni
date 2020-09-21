@@ -44,11 +44,13 @@ ftrace_proto_names = [
   "raw_syscalls.proto",
   "regulator.proto",
   "sched.proto",
+  "scm.proto",
   "sde.proto",
   "signal.proto",
   "sync.proto",
   "systrace.proto",
   "task.proto",
+  "thermal.proto",
   "vmscan.proto",
   "workqueue.proto",
 ]

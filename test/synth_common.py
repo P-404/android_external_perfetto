@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # Copyright (C) 2018 The Android Open Source Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -244,7 +244,7 @@ class Trace(object):
     if seq_id is not None:
       packet.trusted_packet_sequence_id = seq_id
     snap = self.packet.clock_snapshot
-    for k, v in clocks.iteritems():
+    for k, v in clocks.items():
       clock = snap.clocks.add()
       clock.clock_id = k
       clock.timestamp = v
@@ -307,6 +307,7 @@ class Trace(object):
                             context,
                             render_target_handle=None,
                             render_pass_handle=None,
+                            render_subpass_index_mask=None,
                             command_buffer_handle=None,
                             submission_id=None,
                             extra_data={}):
@@ -322,6 +323,9 @@ class Trace(object):
       render_stage.render_target_handle = render_target_handle
     if render_pass_handle is not None:
       render_stage.render_pass_handle = render_pass_handle
+    if render_subpass_index_mask is not None:
+      for mask in render_subpass_index_mask:
+        render_stage.render_subpass_index_mask.append(mask)
     if command_buffer_handle is not None:
       render_stage.command_buffer_handle = command_buffer_handle
     if submission_id is not None:
@@ -388,6 +392,12 @@ class Trace(object):
     for index in freqs:
       thread.cpu_freq_indices.append(index)
       thread.cpu_freq_ticks.append(freqs[index])
+
+  def add_gpu_mem_total(self, pid, ts, size):
+    ftrace = self.__add_ftrace_event(ts, pid)
+    gpu_mem_total_event = ftrace.gpu_mem_total
+    gpu_mem_total_event.pid = pid
+    gpu_mem_total_event.size = size
 
 
 def create_trace():

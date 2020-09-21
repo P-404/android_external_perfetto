@@ -39,7 +39,6 @@
 #include "src/trace_processor/importers/proto/heap_profile_tracker.h"
 #include "src/trace_processor/importers/proto/metadata_tracker.h"
 #include "src/trace_processor/importers/proto/packet_sequence_state.h"
-#include "src/trace_processor/importers/proto/perf_sample_tracker.h"
 #include "src/trace_processor/importers/proto/profile_packet_utils.h"
 #include "src/trace_processor/importers/proto/stack_profile_tracker.h"
 #include "src/trace_processor/storage/metadata.h"
@@ -54,7 +53,6 @@
 #include "protos/perfetto/trace/chrome/chrome_trace_event.pbzero.h"
 #include "protos/perfetto/trace/interned_data/interned_data.pbzero.h"
 #include "protos/perfetto/trace/perfetto/perfetto_metatrace.pbzero.h"
-#include "protos/perfetto/trace/perfetto/tracing_service_event.pbzero.h"
 #include "protos/perfetto/trace/profiling/profile_common.pbzero.h"
 #include "protos/perfetto/trace/profiling/profile_packet.pbzero.h"
 #include "protos/perfetto/trace/profiling/smaps.pbzero.h"
@@ -153,10 +151,6 @@ void ProtoTraceParser::ParseTracePacketImpl(
 
   if (packet.has_trigger()) {
     ParseTrigger(ts, packet.trigger());
-  }
-
-  if (packet.has_service_event()) {
-    ParseServiceEvent(ts, packet.service_event());
   }
 
   if (packet.has_smaps_packet()) {
@@ -318,6 +312,12 @@ void ProtoTraceParser::ParseProfilePacket(
 
       HeapProfileTracker::SourceAllocation src_allocation;
       src_allocation.pid = entry.pid();
+      if (entry.heap_name().size != 0) {
+        src_allocation.heap_name =
+            context_->storage->InternString(entry.heap_name());
+      } else {
+        src_allocation.heap_name = context_->storage->InternString("malloc");
+      }
       src_allocation.timestamp = timestamp;
       src_allocation.callstack_id = sample.callstack_id();
       if (sample.self_max()) {
@@ -373,11 +373,12 @@ void ProtoTraceParser::ParsePerfSample(
     return;
   }
 
-  uint64_t callstack_iid = sample.callstack_iid();
+  // Proper sample, though possibly with an incomplete stack unwind.
   StackProfileTracker& stack_tracker =
       sequence_state->state()->stack_profile_tracker();
   ProfilePacketInternLookup intern_lookup(sequence_state);
 
+  uint64_t callstack_iid = sample.callstack_iid();
   base::Optional<CallsiteId> cs_id =
       stack_tracker.FindOrInsertCallstack(callstack_iid, &intern_lookup);
   if (!cs_id) {
@@ -388,8 +389,27 @@ void ProtoTraceParser::ParsePerfSample(
     return;
   }
 
-  context_->perf_sample_tracker->AddStackToSliceTrack(
-      ts, *cs_id, sample.pid(), sample.tid(), sample.cpu());
+  UniqueTid utid =
+      context_->process_tracker->UpdateThread(sample.tid(), sample.pid());
+
+  using protos::pbzero::Profiling;
+  TraceStorage* storage = context_->storage.get();
+
+  auto cpu_mode = static_cast<Profiling::CpuMode>(sample.cpu_mode());
+  StringPool::Id cpu_mode_id =
+      storage->InternString(ProfilePacketUtils::StringifyCpuMode(cpu_mode));
+
+  base::Optional<StringPool::Id> unwind_error_id;
+  if (sample.has_unwind_error()) {
+    auto unwind_error =
+        static_cast<Profiling::StackUnwindError>(sample.unwind_error());
+    unwind_error_id = storage->InternString(
+        ProfilePacketUtils::StringifyStackUnwindError(unwind_error));
+  }
+
+  tables::PerfSampleTable::Row sample_row{
+      ts, cs_id.value(), utid, sample.cpu(), cpu_mode_id, unwind_error_id};
+  context_->storage->mutable_perf_sample_table()->Insert(sample_row);
 }
 
 void ProtoTraceParser::ParseChromeBenchmarkMetadata(ConstBytes blob) {
@@ -713,14 +733,6 @@ void ProtoTraceParser::ParseTrigger(int64_t ts, ConstBytes blob) {
         args_table->AddArg(trusted_producer_uid_key,
                            Variadic::Integer(trigger.trusted_producer_uid()));
       });
-}
-
-void ProtoTraceParser::ParseServiceEvent(int64_t ts, ConstBytes blob) {
-  protos::pbzero::TracingServiceEvent::Decoder tse(blob.data, blob.size);
-  if (tse.all_data_sources_started()) {
-    context_->metadata_tracker->SetMetadata(
-        metadata::all_data_source_started_ns, Variadic::Integer(ts));
-  }
 }
 
 void ProtoTraceParser::ParseSmapsPacket(int64_t ts, ConstBytes blob) {

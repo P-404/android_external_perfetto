@@ -32,8 +32,8 @@ import uuid
 
 
 TRACE_TO_TEXT_SHAS = {
-    'linux': 'aba0e660818bfc249992ebbceb13a2e4c9a62c3a',
-    'mac': 'c7d1b9d904f008bfb95125b204837eff946c3ed7',
+    'linux': 'a1e1e0b447721ea11285784355a834515caa1ea2',
+    'mac': '1af18304a16a7b35e9c30c718bdfab4732d9abfc',
 }
 TRACE_TO_TEXT_PATH = tempfile.gettempdir()
 TRACE_TO_TEXT_BASE_URL = ('https://storage.googleapis.com/perfetto/')
@@ -126,7 +126,7 @@ def print_no_profile_error():
   print("No profiles generated", file=sys.stderr)
   print(
     "If this is unexpected, check "
-    "https://docs.perfetto.dev/#/heapprofd?id=troubleshooting.",
+    "https://perfetto.dev/docs/data-sources/native-heap-profiler#troubleshooting.",
     file=sys.stderr)
 
 SDK = {
@@ -160,6 +160,8 @@ def main(argv):
       "Default 7 days.",
       type=int,
       default=604800000)
+  # This flag is a no-op now. We never start heapprofd explicitly using system
+  # properties.
   parser.add_argument(
       "--no-start", help="Do not start heapprofd.", action='store_true')
   parser.add_argument(
@@ -180,6 +182,11 @@ def main(argv):
       help="Dump interval in ms. 0 to disable continuous dump.",
       type=int,
       default=0)
+  parser.add_argument(
+      "--heaps",
+      help="Comma-separated list of heaps to collect, e.g: malloc,art. "
+      "Requires Android 12.",
+      metavar="HEAPS")
   parser.add_argument(
       "--disable-selinux",
       action="store_true",
@@ -258,19 +265,6 @@ def main(argv):
       default=None)
 
   args = parser.parse_args()
-
-  # TODO(fmayer): Maybe feature detect whether we can remove traces instead of
-  # this.
-  uuid_trace = release_or_newer('R')
-  if uuid_trace:
-    profile_device_path = '/data/misc/perfetto-traces/profile-' + UUID
-  else:
-    user = subprocess.check_output(
-      ['adb', 'shell', 'whoami']).decode('utf-8').strip()
-    profile_device_path = '/data/misc/perfetto-traces/profile-' + user
-  perfetto_cmd = ('CFG=\'{cfg}\'; echo ${{CFG}} | '
-                  'perfetto --txt -c - -o ' + profile_device_path + ' -d')
-
   fail = False
   if args.block_client and args.no_block_client:
     print(
@@ -321,6 +315,9 @@ def main(argv):
   if args.name:
     for name in args.name.split(','):
       target_cfg += '{}process_cmdline: "{}"\n'.format(CFG_INDENT, name)
+  if args.heaps:
+    for heap in args.heaps.split(','):
+      target_cfg += '{}heaps: "{}"\n'.format(CFG_INDENT, heap)
 
   if fail:
     parser.print_help()
@@ -356,22 +353,25 @@ def main(argv):
     print(cfg)
     return 0
 
+  # TODO(fmayer): Maybe feature detect whether we can remove traces instead of
+  # this.
+  uuid_trace = release_or_newer('R')
+  if uuid_trace:
+    profile_device_path = '/data/misc/perfetto-traces/profile-' + UUID
+  else:
+    user = subprocess.check_output(
+      ['adb', 'shell', 'whoami']).decode('utf-8').strip()
+    profile_device_path = '/data/misc/perfetto-traces/profile-' + user
+
+  perfetto_cmd = ('CFG=\'{cfg}\'; echo ${{CFG}} | '
+                  'perfetto --txt -c - -o ' + profile_device_path + ' -d')
+
   if args.disable_selinux:
     enforcing = subprocess.check_output(['adb', 'shell', 'getenforce'])
     atexit.register(
         subprocess.check_call,
         ['adb', 'shell', 'su root setenforce %s' % enforcing])
     subprocess.check_call(['adb', 'shell', 'su root setenforce 0'])
-
-  if not args.no_start:
-    heapprofd_prop = subprocess.check_output(
-        ['adb', 'shell', 'getprop persist.heapprofd.enable'])
-    if heapprofd_prop.strip() != '1':
-      subprocess.check_call(
-          ['adb', 'shell', 'setprop persist.heapprofd.enable 1'])
-      atexit.register(subprocess.check_call,
-                      ['adb', 'shell', 'setprop persist.heapprofd.enable 0'])
-
 
   if args.simpleperf:
     subprocess.check_call([

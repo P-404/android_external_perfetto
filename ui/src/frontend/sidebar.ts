@@ -154,7 +154,8 @@ const SECTIONS = [
         checkDownloadDisabled: true,
       },
       {t: 'Legacy UI', a: openCurrentTraceWithOldUI, i: 'filter_none'},
-      {t: 'Analyze', a: navigateAnalyze, i: 'control_camera'},
+      {t: 'Query (SQL)', a: navigateAnalyze, i: 'control_camera'},
+      {t: 'Info and stats', a: navigateInfo, i: 'info'},
     ],
   },
   {
@@ -426,7 +427,12 @@ function navigateRecord(e: Event) {
 
 function navigateAnalyze(e: Event) {
   e.preventDefault();
-  globals.dispatch(Actions.navigate({route: '/analyze'}));
+  globals.dispatch(Actions.navigate({route: '/query'}));
+}
+
+function navigateInfo(e: Event) {
+  e.preventDefault();
+  globals.dispatch(Actions.navigate({route: '/info'}));
 }
 
 function navigateViewer(e: Event) {
@@ -646,7 +652,10 @@ export class Sidebar implements m.ClassComponent {
         if (isDownloadAndShareDisabled() &&
             item.hasOwnProperty('checkDownloadDisabled')) {
           attrs = {
-            onclick: () => alert('Can not download or share external trace.'),
+            onclick: e => {
+              e.preventDefault();
+              alert('Can not download or share external trace.');
+            },
             href: '#',
             target: null,
             disabled: true,
