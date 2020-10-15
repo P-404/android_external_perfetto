@@ -47,6 +47,8 @@ config("extra_warnings") {
       "-Wno-padded",
       "-Wno-reserved-id-macro",
       "-Wno-unknown-sanitizers",
+      "-Wno-unknown-warning-option",
+      "-Wno-poison-system-directories",
     ]
   }
 
@@ -85,6 +87,10 @@ config("default") {
   defines = []
   ldflags = []
   libs = []
+
+  if (is_android || is_linux) {
+    ldflags += [ "-Wl,--build-id" ]
+  }
 
   cflags += [
     "-fstrict-aliasing",
@@ -177,7 +183,6 @@ config("default") {
       "-Wl,--exclude-libs,libunwind.a",
       "-Wl,--exclude-libs,libgcc.a",
       "-Wl,--exclude-libs,libc++_static.a",
-      "-Wl,--build-id",
       "-Wl,--no-undefined",
       "-Wl,-z,noexecstack",
       "-Wl,-z,relro",

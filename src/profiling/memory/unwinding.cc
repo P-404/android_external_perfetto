@@ -168,8 +168,10 @@ bool DoUnwind(WireMessage* msg, UnwindingMetadata* metadata, AllocRecord* out) {
     }
     unwinder.Unwind(&kSkipMaps, /*map_suffixes_to_ignore=*/nullptr);
     error_code = unwinder.LastErrorCode();
-    if (error_code != unwindstack::ERROR_INVALID_MAP)
+    if (error_code != unwindstack::ERROR_INVALID_MAP &&
+        (unwinder.warnings() & unwindstack::WARNING_DEX_PC_NOT_IN_MAP) == 0) {
       break;
+    }
   }
   std::vector<unwindstack::FrameData> frames = unwinder.ConsumeFrames();
   for (unwindstack::FrameData& fd : frames) {
@@ -317,6 +319,13 @@ void UnwindingWorker::HandleBuffer(const SharedRingBuffer::Buffer& buf,
       client_data->free_records.clear();
       client_data->free_records.reserve(kRecordBatchSize);
     }
+  } else if (msg.record_type == RecordType::HeapName) {
+    HeapNameRecord rec;
+    rec.pid = peer_pid;
+    rec.data_source_instance_id = data_source_instance_id;
+    memcpy(&rec.entry, msg.heap_name_header, sizeof(*msg.heap_name_header));
+    rec.entry.heap_name[sizeof(rec.entry.heap_name) - 1] = '\0';
+    delegate->PostHeapNameRecord(std::move(rec));
   } else {
     PERFETTO_DFATAL_OR_ELOG("Invalid record type.");
   }

@@ -29,9 +29,8 @@ interface CallsiteInfoWidth {
   width: number;
 }
 
-const NODE_HEIGHT_DEFAULT = 15;
+const NODE_HEIGHT_DEFAULT = 17;
 
-export const HEAP_PROFILE_COLOR = 'hsl(224, 45%, 70%)';
 export const HEAP_PROFILE_HOVERED_COLOR = 'hsl(224, 45%, 55%)';
 
 export function findRootSize(data: CallsiteInfo[]) {
@@ -50,12 +49,11 @@ export interface NodeRendering {
 }
 
 export class Flamegraph {
-  private isThumbnail = false;
   private nodeRendering: NodeRendering = {};
   private flamegraphData: CallsiteInfo[];
   private maxDepth = -1;
   private totalSize = -1;
-  private textSize = 12;
+  private textSize = 14;
   // Key for the map is depth followed by x coordinate - `depth;x`
   private graphData: Map<string, CallsiteInfoWidth> = new Map();
   private xStartsPerDepth: Map<number, number[]> = new Map();
@@ -86,9 +84,6 @@ export class Flamegraph {
   }
 
   generateColor(name: string, isGreyedOut = false): string {
-    if (this.isThumbnail) {
-      return HEAP_PROFILE_COLOR;
-    }
     if (isGreyedOut) {
       return '#d9d9d9';
     }
@@ -96,7 +91,7 @@ export class Flamegraph {
       return '#c0c0c0';
     }
     const hue = this.hash(name);
-    return `hsl(${hue}, 50%, 65%)`;
+    return `hsl(${hue}, 40%, 70%)`;
   }
 
   /**
@@ -166,7 +161,7 @@ export class Flamegraph {
         continue;
       }
 
-      const isClicked = !this.isThumbnail && this.clickedCallsite !== undefined;
+      const isClicked = this.clickedCallsite !== undefined;
       const isFullWidth =
           isClicked && value.depth <= this.clickedCallsite!.depth;
       const isGreyedOut =
@@ -200,11 +195,6 @@ export class Flamegraph {
         size: parentNode.size,
         x: parentNode.x
       });
-
-      // Thumbnail mode doesn't have name on nodes and click/hover behaviour.
-      if (this.isThumbnail) {
-        continue;
-      }
 
       // Draw name.
       ctx.font = `${this.textSize}px Roboto Condensed`;
@@ -345,9 +335,6 @@ export class Flamegraph {
   }
 
   onMouseClick({x, y}: {x: number, y: number}): CallsiteInfo|undefined {
-    if (this.isThumbnail) {
-      return undefined;
-    }
     const clickedCallsite = this.findSelectedCallsite(x, y);
     // TODO(b/148596659): Allow to expand [merged] callsites. Currently,
     // this expands to the biggest of the nodes that were merged, which
@@ -385,11 +372,7 @@ export class Flamegraph {
   }
 
   getNodeHeight() {
-    return this.isThumbnail ? 1 : NODE_HEIGHT_DEFAULT;
-  }
-
-  enableThumbnail(isThumbnail: boolean) {
-    this.isThumbnail = isThumbnail;
+    return NODE_HEIGHT_DEFAULT;
   }
 }
 

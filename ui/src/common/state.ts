@@ -29,10 +29,20 @@ export type OmniboxState =
 export type VisibleState =
     Timestamped<{startSec: number; endSec: number; resolution: number;}>;
 
-export type TimestampedAreaSelection = Timestamped<AreaSelection>;
 export interface AreaSelection {
-  area?: Area;
+  kind: 'AREA';
+  areaId: string;
+  // When an area is marked it will be assigned a unique note id and saved as
+  // an AreaNote for the user to return to later. id = 0 is the special id that
+  // is overwritten when a new area is marked. Any other id is a persistent
+  // marking that will not be overwritten.
+  // When not set, the area selection will be replaced with any
+  // new area selection (i.e. not saved anywhere).
+  noteId?: string;
 }
+
+export type AreaById = Area&{id: string};
+
 export interface Area {
   startSec: number;
   endSec: number;
@@ -42,7 +52,6 @@ export interface Area {
 export const MAX_TIME = 180;
 
 export const SCROLLING_TRACK_GROUP = 'ScrollingTracks';
-
 
 export type EngineMode = 'WASM'|'HTTP_RPC';
 
@@ -101,7 +110,6 @@ export interface TrackGroupState {
   name: string;
   collapsed: boolean;
   tracks: string[];  // Child track ids.
-  summaryTrackId: string;
 }
 
 export interface EngineConfig {
@@ -121,6 +129,8 @@ export interface QueryConfig {
 export interface PermalinkConfig {
   requestId?: string;  // Set by the frontend to request a new permalink.
   hash?: string;       // Set by the controller when the link has been created.
+  isRecordingConfig?:
+      boolean;  // this permalink request is for a recording config only
 }
 
 export interface TraceTime {
@@ -131,7 +141,6 @@ export interface TraceTime {
 export interface FrontendLocalState {
   omniboxState: OmniboxState;
   visibleState: VisibleState;
-  selectedArea: TimestampedAreaSelection;
 }
 
 export interface Status {
@@ -150,8 +159,7 @@ export interface Note {
 export interface AreaNote {
   noteType: 'AREA';
   id: string;
-  timestamp: number;
-  area: Area;
+  areaId: string;
   color: string;
   text: string;
 }
@@ -207,16 +215,13 @@ export interface ChromeSliceSelection {
 
 export interface ThreadStateSelection {
   kind: 'THREAD_STATE';
-  utid: number;
-  ts: number;
-  dur: number;
-  state: string;
-  cpu: number;
+  id: number;
 }
 
-type Selection = (NoteSelection|SliceSelection|CounterSelection|
-                  HeapProfileSelection|CpuProfileSampleSelection|
-                  ChromeSliceSelection|ThreadStateSelection)&{trackId?: string};
+type Selection =
+    (NoteSelection|SliceSelection|CounterSelection|HeapProfileSelection|
+     CpuProfileSampleSelection|ChromeSliceSelection|ThreadStateSelection|
+     AreaSelection)&{trackId?: string};
 
 export interface LogsPagination {
   offset: number;
@@ -247,6 +252,8 @@ export interface State {
   [key: string]: any;
   route: string|null;
   nextId: number;
+  nextNoteId: number;
+  nextAreaId: number;
 
   /**
    * State of the ConfigEditor.
@@ -262,6 +269,7 @@ export interface State {
   traceTime: TraceTime;
   trackGroups: ObjectById<TrackGroupState>;
   tracks: ObjectById<TrackState>;
+  areas: ObjectById<AreaById>;
   aggregatePreferences: ObjectById<AggregationState>;
   visibleTracks: string[];
   scrollingTracks: string[];
@@ -300,6 +308,7 @@ export interface State {
   lastRecordingError?: string;
   recordingStatus?: string;
 
+  updateChromeCategories: boolean;
   chromeCategories: string[]|undefined;
   analyzePageQuery?: string;
 }
@@ -348,7 +357,6 @@ export interface RecordConfig {
   fileWritePeriodMs: number;  // Only for mode == 'LONG_TRACE'.
 
   cpuSched: boolean;
-  cpuLatency: boolean;
   cpuFreq: boolean;
   cpuCoarse: boolean;
   cpuCoarsePollMs: number;
@@ -357,6 +365,7 @@ export interface RecordConfig {
   screenRecord: boolean;
 
   gpuFreq: boolean;
+  gpuMemTotal: boolean;
 
   ftrace: boolean;
   atrace: boolean;
@@ -410,13 +419,13 @@ export function createEmptyRecordConfig(): RecordConfig {
     bufferSizeMb: 10.0,
 
     cpuSched: false,
-    cpuLatency: false,
     cpuFreq: false,
     cpuSyscall: false,
 
     screenRecord: false,
 
     gpuFreq: false,
+    gpuMemTotal: false,
 
     ftrace: false,
     atrace: false,
@@ -688,6 +697,8 @@ export function createEmptyState(): State {
   return {
     route: null,
     nextId: 0,
+    nextNoteId: 1,  // 0 is reserved for ephemeral area marking.
+    nextAreaId: 0,
     newEngineMode: 'USE_HTTP_RPC_IF_AVAILABLE',
     engines: {},
     traceTime: {...defaultTraceTime},
@@ -697,6 +708,7 @@ export function createEmptyState(): State {
     visibleTracks: [],
     pinnedTracks: [],
     scrollingTracks: [],
+    areas: {},
     queries: {},
     permalink: {},
     notes: {},
@@ -716,9 +728,6 @@ export function createEmptyState(): State {
         lastUpdate: 0,
         resolution: 0,
       },
-      selectedArea: {
-        lastUpdate: 0,
-      }
     },
 
     logsPagination: {
@@ -742,6 +751,7 @@ export function createEmptyState(): State {
     recordingTarget: getDefaultRecordingTargets()[0],
     availableAdbDevices: [],
 
+    updateChromeCategories: false,
     chromeCategories: undefined,
   };
 }

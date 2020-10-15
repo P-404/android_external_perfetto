@@ -56,7 +56,7 @@ heap profiling can be enabled alongside any other tracing data sources.
 
 #### Using the tools/heap_profile script (recommended)
 
-On Linux / MacOS, use the `tools/heap_profile` script. If you are having trouble
+You can use the `tools/heap_profile` script. If you are having trouble
 make sure you are using the
 [latest version](
 https://raw.githubusercontent.com/google/perfetto/master/tools/heap_profile).
@@ -179,8 +179,8 @@ either the profileable or the debuggable manifest flag set can be profiled.
 Profiling requests for non-profileable/debuggable processes will result in an
 empty profile.
 
-On userdebug builds, all processes except for a small blacklist of critical
-services can be profiled (to find the blacklist, look for
+On userdebug builds, all processes except for a small set of critical
+services can be profiled (to find the set of disallowed targets, look for
 `never_profile_heap` in [heapprofd.te](
 https://cs.android.com/android/platform/superproject/+/master:system/sepolicy/private/heapprofd.te?q=never_profile_heap).
 This restriction can be lifted by disabling SELinux by running
@@ -364,6 +364,10 @@ If this does not show one or more of the sections, change your build system
 to not strip them.
 
 ## Known Issues
+
+### Android 11
+
+* 32-bit programs cannot be targeted on 64-bit devices.
 
 ### Android 10
 

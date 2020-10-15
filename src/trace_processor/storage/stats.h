@@ -27,7 +27,7 @@ namespace stats {
 // clang-format off
 #define PERFETTO_TP_STATS(F)                                                   \
   F(android_log_num_failed,             kSingle,  kError,    kTrace,    ""),   \
-  F(android_log_num_skipped,            kSingle,  kError,    kTrace,    ""),   \
+  F(android_log_num_skipped,            kSingle,  kInfo,     kTrace,    ""),   \
   F(android_log_num_total,              kSingle,  kInfo,     kTrace,    ""),   \
   F(counter_events_out_of_order,        kSingle,  kError,    kAnalysis, ""),   \
   F(ftrace_bundle_tokenizer_errors,     kSingle,  kError,    kAnalysis, ""),   \
@@ -71,6 +71,12 @@ namespace stats {
   F(rss_stat_unknown_thread_for_mm_id,  kSingle,  kInfo,     kAnalysis, ""),   \
   F(sched_switch_out_of_order,          kSingle,  kError,    kAnalysis, ""),   \
   F(slice_out_of_order,                 kSingle,  kError,    kAnalysis, ""),   \
+  F(flow_duplicate_id,                  kSingle,  kError,    kTrace,    ""),   \
+  F(flow_no_enclosing_slice,            kSingle,  kError,    kTrace,    ""),   \
+  F(flow_step_without_start,            kSingle,  kInfo,     kTrace,    ""),   \
+  F(flow_end_without_start,             kSingle,  kInfo,     kTrace,    ""),   \
+  F(flow_invalid_id,                    kSingle,  kError,    kTrace,    ""),   \
+  F(flow_without_direction,             kSingle,  kError,    kTrace,    ""),   \
   F(stackprofile_invalid_string_id,     kSingle,  kError,    kTrace,    ""),   \
   F(stackprofile_invalid_mapping_id,    kSingle,  kError,    kTrace,    ""),   \
   F(stackprofile_invalid_frame_id,      kSingle,  kError,    kTrace,    ""),   \
