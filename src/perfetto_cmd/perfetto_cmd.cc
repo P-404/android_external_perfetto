@@ -167,8 +167,6 @@ light configuration flags: (only when NOT using -c/--config)
   --size           -s      : Max file size N[mb,gb] (default: in-memory ring-buffer only)
   ATRACE_CAT               : Record ATRACE_CAT (e.g. wm)
   FTRACE_GROUP/FTRACE_NAME : Record ftrace event (e.g. sched/sched_switch)
-  FTRACE_GROUP/*           : Record all events in group (e.g. sched/*)
-
 
 statsd-specific flags:
   --alert-id           : ID of the alert that triggered this trace.
@@ -497,7 +495,8 @@ int PerfettoCmd::Main(int argc, char** argv) {
     return 1;
   }
 
-  if (trace_config_->incident_report_config().destination_package().empty() &&
+  if (trace_config_->activate_triggers().empty() &&
+      trace_config_->incident_report_config().destination_package().empty() &&
       is_uploading_) {
     PERFETTO_ELOG("Missing IncidentReportConfig with --dropbox / --upload.");
     return 1;
@@ -730,7 +729,8 @@ void PerfettoCmd::OnConnect() {
   // Failsafe mechanism to avoid waiting indefinitely if the service hangs.
   if (expected_duration_ms_) {
     uint32_t trace_timeout =
-        expected_duration_ms_ + 60000 + trace_config_->flush_timeout_ms();
+        expected_duration_ms_ + 60000 + trace_config_->flush_timeout_ms() +
+        trace_config_->data_source_stop_timeout_ms();
     task_runner_.PostDelayedTask(std::bind(&PerfettoCmd::OnTimeout, this),
                                  trace_timeout);
   }

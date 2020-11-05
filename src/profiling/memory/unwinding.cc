@@ -59,7 +59,7 @@ namespace {
 
 constexpr base::TimeMillis kMapsReparseInterval{500};
 
-constexpr size_t kMaxFrames = 1000;
+constexpr size_t kMaxFrames = 200;
 
 // We assume average ~300us per unwind. If we handle up to 1000 unwinds, this
 // makes sure other tasks get to be run at least every 300ms if the unwinding
@@ -141,8 +141,8 @@ bool DoUnwind(WireMessage* msg, UnwindingMetadata* metadata, AllocRecord* out) {
   unwindstack::Unwinder unwinder(kMaxFrames, &metadata->fd_maps, regs.get(),
                                  mems);
 #if PERFETTO_BUILDFLAG(PERFETTO_ANDROID_BUILD)
-  unwinder.SetJitDebug(metadata->jit_debug.get(), regs->Arch());
-  unwinder.SetDexFiles(metadata->dex_files.get(), regs->Arch());
+  unwinder.SetJitDebug(metadata->jit_debug.get());
+  unwinder.SetDexFiles(metadata->dex_files.get());
 #endif
   // Suppress incorrect "variable may be uninitialized" error for if condition
   // after this loop. error_code = LastErrorCode gets run at least once.
@@ -162,8 +162,8 @@ bool DoUnwind(WireMessage* msg, UnwindingMetadata* metadata, AllocRecord* out) {
       ReadFromRawData(regs.get(), alloc_metadata->register_data);
       out->reparsed_map = true;
 #if PERFETTO_BUILDFLAG(PERFETTO_ANDROID_BUILD)
-      unwinder.SetJitDebug(metadata->jit_debug.get(), regs->Arch());
-      unwinder.SetDexFiles(metadata->dex_files.get(), regs->Arch());
+      unwinder.SetJitDebug(metadata->jit_debug.get());
+      unwinder.SetDexFiles(metadata->dex_files.get());
 #endif
     }
     unwinder.Unwind(&kSkipMaps, /*map_suffixes_to_ignore=*/nullptr);
@@ -174,6 +174,7 @@ bool DoUnwind(WireMessage* msg, UnwindingMetadata* metadata, AllocRecord* out) {
     }
   }
   std::vector<unwindstack::FrameData> frames = unwinder.ConsumeFrames();
+  out->frames.reserve(frames.size() + 1);
   for (unwindstack::FrameData& fd : frames) {
     out->frames.emplace_back(metadata->AnnotateFrame(std::move(fd)));
   }

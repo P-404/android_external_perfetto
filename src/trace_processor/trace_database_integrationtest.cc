@@ -196,6 +196,18 @@ TEST_F(TraceProcessorIntegrationTest, SerializeMetricDescriptors) {
   ASSERT_EQ(trace_metrics_count, 1);
 }
 
+TEST_F(TraceProcessorIntegrationTest, ComputeMetricsFormatted) {
+  std::string metric_output;
+  util::Status status = Processor()->ComputeMetricText(
+      std::vector<std::string>{"test_chrome_metric"},
+      TraceProcessor::MetricResultFormat::kProtoText, &metric_output);
+  ASSERT_TRUE(status.ok());
+  ASSERT_EQ(metric_output,
+            "test_chrome_metric: {\n"
+            "  test_value: 1\n"
+            "}");
+}
+
 // TODO(hjd): Add trace to test_data.
 TEST_F(TraceProcessorIntegrationTest, DISABLED_AndroidBuildTrace) {
   ASSERT_TRUE(LoadTrace("android_build_trace.json", strlen("[\n{")).ok());
@@ -266,7 +278,7 @@ TEST_F(TraceProcessorIntegrationTest, MAYBE_Clusterfuzz20215) {
 }
 
 TEST_F(TraceProcessorIntegrationTest, MAYBE_Clusterfuzz20292) {
-  ASSERT_TRUE(LoadTrace("clusterfuzz_20292", 4096).ok());
+  ASSERT_FALSE(LoadTrace("clusterfuzz_20292", 4096).ok());
 }
 
 TEST_F(TraceProcessorIntegrationTest, MAYBE_Clusterfuzz21178) {
@@ -274,11 +286,11 @@ TEST_F(TraceProcessorIntegrationTest, MAYBE_Clusterfuzz21178) {
 }
 
 TEST_F(TraceProcessorIntegrationTest, MAYBE_Clusterfuzz21890) {
-  ASSERT_TRUE(LoadTrace("clusterfuzz_21890", 4096).ok());
+  ASSERT_FALSE(LoadTrace("clusterfuzz_21890", 4096).ok());
 }
 
 TEST_F(TraceProcessorIntegrationTest, MAYBE_Clusterfuzz23053) {
-  ASSERT_TRUE(LoadTrace("clusterfuzz_23053", 4096).ok());
+  ASSERT_FALSE(LoadTrace("clusterfuzz_23053", 4096).ok());
 }
 
 TEST_F(TraceProcessorIntegrationTest, RestoreInitialTables) {

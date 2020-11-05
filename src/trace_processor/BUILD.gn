@@ -88,6 +88,8 @@ source_set("storage_minimal") {
     "importers/ninja/ninja_log_parser.h",
     "importers/proto/args_table_utils.cc",
     "importers/proto/args_table_utils.h",
+    "importers/proto/async_track_set_tracker.cc",
+    "importers/proto/async_track_set_tracker.h",
     "importers/proto/heap_profile_tracker.cc",
     "importers/proto/heap_profile_tracker.h",
     "importers/proto/metadata_tracker.cc",
@@ -284,6 +286,8 @@ if (enable_perfetto_trace_processor_sqlite) {
     sources = [
       "dynamic/ancestor_slice_generator.cc",
       "dynamic/ancestor_slice_generator.h",
+      "dynamic/connected_flow_generator.cc",
+      "dynamic/connected_flow_generator.h",
       "dynamic/descendant_slice_generator.cc",
       "dynamic/descendant_slice_generator.h",
       "dynamic/describe_slice_generator.cc",
@@ -323,6 +327,7 @@ if (enable_perfetto_trace_processor_sqlite) {
       "tables",
       "types",
       "util",
+      "util:protozero_to_text",
     ]
     public_deps = [
       "../../gn:sqlite",  # iterator_impl.h includes sqlite3.h.

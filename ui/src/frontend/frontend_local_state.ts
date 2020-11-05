@@ -127,7 +127,7 @@ export class FrontendLocalState {
 
   setHighlightedSliceId(sliceId: number) {
     this.highlightedSliceId = sliceId;
-    globals.rafScheduler.scheduleFullRedraw();
+    globals.rafScheduler.scheduleRedraw();
   }
 
   // Sets the timestamp at which a vertical line will be drawn.
@@ -170,7 +170,6 @@ export class FrontendLocalState {
 
   // Called when beginning a canvas redraw.
   clearVisibleTracks() {
-    this.prevVisibleTracks = new Set(this.visibleTracks);
     this.visibleTracks.clear();
   }
 
@@ -181,6 +180,7 @@ export class FrontendLocalState {
             value => this.visibleTracks.has(value))) {
       globals.dispatch(
           Actions.setVisibleTracks({tracks: Array.from(this.visibleTracks)}));
+      this.prevVisibleTracks = new Set(this.visibleTracks);
     }
   }
 

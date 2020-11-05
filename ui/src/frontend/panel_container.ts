@@ -39,7 +39,7 @@ const SCROLLING_CANVAS_OVERDRAW_FACTOR = 1.2;
 
 // We need any here so we can accept vnodes with arbitrary attrs.
 // tslint:disable-next-line:no-any
-export type AnyAttrsVnode = m.Vnode<any, {}>;
+export type AnyAttrsVnode = m.Vnode<any, any>;
 
 export interface Attrs {
   panels: AnyAttrsVnode[];
@@ -218,7 +218,9 @@ export class PanelContainer implements m.ClassComponent<Attrs> {
   view({attrs}: m.CVnode<Attrs>) {
     this.attrs = attrs;
     const renderPanel = (panel: m.Vnode) => perfDebug() ?
-        m('.panel', panel, m('.debug-panel-border')) :
+        m('.panel',
+          {key: panel.key},
+          [panel, m('.debug-panel-border', {key: 'debug-panel-border'})]) :
         m('.panel', {key: panel.key}, panel);
 
     return [

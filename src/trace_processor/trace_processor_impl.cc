@@ -24,6 +24,7 @@
 #include "perfetto/ext/base/string_splitter.h"
 #include "perfetto/ext/base/string_utils.h"
 #include "src/trace_processor/dynamic/ancestor_slice_generator.h"
+#include "src/trace_processor/dynamic/connected_flow_generator.h"
 #include "src/trace_processor/dynamic/descendant_slice_generator.h"
 #include "src/trace_processor/dynamic/describe_slice_generator.h"
 #include "src/trace_processor/dynamic/experimental_counter_dur_generator.h"
@@ -52,6 +53,7 @@
 #include "src/trace_processor/sqlite/window_operator_table.h"
 #include "src/trace_processor/tp_metatrace.h"
 #include "src/trace_processor/types/variadic.h"
+#include "src/trace_processor/util/protozero_to_text.h"
 
 #include "protos/perfetto/trace/perfetto/perfetto_metatrace.pbzero.h"
 #include "protos/perfetto/trace/trace.pbzero.h"
@@ -148,6 +150,17 @@ void CreateBuiltinTables(sqlite3* db) {
     sqlite3_free(error);
   }
   sqlite3_exec(db, "CREATE TABLE trace_metrics(name STRING)", 0, 0, &error);
+  if (error) {
+    PERFETTO_ELOG("Error initializing: %s", error);
+    sqlite3_free(error);
+  }
+  // This is a table intended to be used for metric debugging/developing. Data
+  // in the table is shown specially in the UI, and users can insert rows into
+  // this table to draw more things.
+  sqlite3_exec(db,
+               "CREATE TABLE debug_slices (id BIG INT, name STRING, ts BIG INT,"
+               "dur BIG INT, depth BIG INT)",
+               0, 0, &error);
   if (error) {
     PERFETTO_ELOG("Error initializing: %s", error);
     sqlite3_free(error);
@@ -731,6 +744,15 @@ TraceProcessorImpl::TraceProcessorImpl(const Config& cfg)
       new AncestorSliceGenerator(&context_)));
   RegisterDynamicTable(std::unique_ptr<DescendantSliceGenerator>(
       new DescendantSliceGenerator(&context_)));
+  RegisterDynamicTable(
+      std::unique_ptr<ConnectedFlowGenerator>(new ConnectedFlowGenerator(
+          ConnectedFlowGenerator::Direction::BOTH, &context_)));
+  RegisterDynamicTable(
+      std::unique_ptr<ConnectedFlowGenerator>(new ConnectedFlowGenerator(
+          ConnectedFlowGenerator::Direction::FOLLOWING, &context_)));
+  RegisterDynamicTable(
+      std::unique_ptr<ConnectedFlowGenerator>(new ConnectedFlowGenerator(
+          ConnectedFlowGenerator::Direction::PRECEDING, &context_)));
   RegisterDynamicTable(std::unique_ptr<ExperimentalSchedUpidGenerator>(
       new ExperimentalSchedUpidGenerator(storage->sched_slice_table(),
                                          storage->thread_table())));
@@ -787,6 +809,11 @@ TraceProcessorImpl::TraceProcessorImpl(const Config& cfg)
   RegisterDbTable(storage->metadata_table());
   RegisterDbTable(storage->cpu_table());
   RegisterDbTable(storage->cpu_freq_table());
+
+  RegisterDbTable(storage->memory_snapshot_table());
+  RegisterDbTable(storage->process_memory_snapshot_table());
+  RegisterDbTable(storage->memory_snapshot_node_table());
+  RegisterDbTable(storage->memory_snapshot_edge_table());
 }
 
 TraceProcessorImpl::~TraceProcessorImpl() = default;
@@ -989,6 +1016,29 @@ util::Status TraceProcessorImpl::ComputeMetric(
   const auto& root_descriptor = pool_.descriptors()[opt_idx.value()];
   return metrics::ComputeMetrics(this, metric_names, sql_metrics_,
                                  root_descriptor, metrics_proto);
+}
+
+util::Status TraceProcessorImpl::ComputeMetricText(
+    const std::vector<std::string>& metric_names,
+    TraceProcessor::MetricResultFormat format,
+    std::string* metrics_string) {
+  std::vector<uint8_t> metrics_proto;
+  util::Status status = ComputeMetric(metric_names, &metrics_proto);
+  if (!status.ok())
+    return status;
+  switch (format) {
+    case TraceProcessor::MetricResultFormat::kProtoText:
+      *metrics_string = protozero_to_text::ProtozeroToText(
+          pool_, ".perfetto.protos.TraceMetrics",
+          protozero::ConstBytes{metrics_proto.data(), metrics_proto.size()},
+          protozero_to_text::kIncludeNewLines);
+      break;
+    case TraceProcessor::MetricResultFormat::kJson:
+      // TODO(dproy): Implement this.
+      PERFETTO_FATAL("Json formatted metrics not supported yet.");
+      break;
+  }
+  return status;
 }
 
 std::vector<uint8_t> TraceProcessorImpl::GetMetricDescriptors() {

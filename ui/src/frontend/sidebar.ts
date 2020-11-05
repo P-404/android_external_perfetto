@@ -112,6 +112,16 @@ function createCannedQuery(query: string): (_: Event) => void {
   };
 }
 
+function showDebugTrack(): (_: Event) => void {
+  return (e: Event) => {
+    e.preventDefault();
+    globals.dispatch(Actions.addDebugTrack({
+      engineId: Object.keys(globals.state.engines)[0],
+      name: 'Debug Slices',
+    }));
+  };
+}
+
 const EXAMPLE_ANDROID_TRACE_URL =
     'https://storage.googleapis.com/perfetto-misc/example_android_trace_15s';
 
@@ -156,6 +166,7 @@ const SECTIONS = [
       },
       {t: 'Legacy UI', a: openCurrentTraceWithOldUI, i: 'filter_none'},
       {t: 'Query (SQL)', a: navigateAnalyze, i: 'control_camera'},
+      {t: 'Metrics', a: navigateMetrics, i: 'speed'},
       {t: 'Info and stats', a: navigateInfo, i: 'info'},
     ],
   },
@@ -180,6 +191,11 @@ const SECTIONS = [
     title: 'Metrics and auditors',
     summary: 'Compute summary statistics',
     items: [
+      {
+        t: 'Show Debug Track',
+        a: showDebugTrack(),
+        i: 'view_day',
+      },
       {
         t: 'All Processes',
         a: createCannedQuery(ALL_PROCESSES_QUERY),
@@ -451,6 +467,11 @@ function navigateAnalyze(e: Event) {
   globals.dispatch(Actions.navigate({route: '/query'}));
 }
 
+function navigateMetrics(e: Event) {
+  e.preventDefault();
+  globals.dispatch(Actions.navigate({route: '/metrics'}));
+}
+
 function navigateInfo(e: Event) {
   e.preventDefault();
   globals.dispatch(Actions.navigate({route: '/info'}));
@@ -501,6 +522,7 @@ function downloadTrace(e: Event) {
   const a = document.createElement('a');
   a.href = url;
   a.download = fileName;
+  a.target = '_blank';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

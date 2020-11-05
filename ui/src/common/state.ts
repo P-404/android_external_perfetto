@@ -51,6 +51,8 @@ export interface Area {
 
 export const MAX_TIME = 180;
 
+export const STATE_VERSION = 2;
+
 export const SCROLLING_TRACK_GROUP = 'ScrollingTracks';
 
 export type EngineMode = 'WASM'|'HTTP_RPC';
@@ -100,6 +102,7 @@ export interface TrackState {
   engineId: string;
   kind: string;
   name: string;
+  isMainThread: boolean;
   trackGroup?: string;
   config: {};
 }
@@ -247,9 +250,16 @@ export interface AggregationState {
   sorting?: Sorting;
 }
 
+export interface MetricsState {
+  availableMetrics?: string[];  // Undefined until list is loaded.
+  selectedIndex?: number;
+  requestedMetric?: string;  // Unset after metric request is handled.
+}
+
 export interface State {
   // tslint:disable-next-line:no-any
   [key: string]: any;
+  version: number;
   route: string|null;
   nextId: number;
   nextNoteId: number;
@@ -274,7 +284,10 @@ export interface State {
   visibleTracks: string[];
   scrollingTracks: string[];
   pinnedTracks: string[];
+  debugTrackId?: string;
+  lastTrackReloadRequest?: number;
   queries: ObjectById<QueryConfig>;
+  metrics: MetricsState;
   permalink: PermalinkConfig;
   notes: ObjectById<Note|AreaNote>;
   status: Status;
@@ -416,7 +429,7 @@ export function createEmptyRecordConfig(): RecordConfig {
     durationMs: 10000.0,
     maxFileSizeMb: 100,
     fileWritePeriodMs: 2500,
-    bufferSizeMb: 10.0,
+    bufferSizeMb: 64.0,
 
     cpuSched: false,
     cpuFreq: false,
@@ -695,6 +708,7 @@ export function getBuiltinChromeCategoryList(): string[] {
 
 export function createEmptyState(): State {
   return {
+    version: STATE_VERSION,
     route: null,
     nextId: 0,
     nextNoteId: 1,  // 0 is reserved for ephemeral area marking.
@@ -710,6 +724,7 @@ export function createEmptyState(): State {
     scrollingTracks: [],
     areas: {},
     queries: {},
+    metrics: {},
     permalink: {},
     notes: {},
 

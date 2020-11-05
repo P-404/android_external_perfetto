@@ -17,6 +17,14 @@ import {Draft} from 'immer';
 import {assertExists} from '../base/logging';
 import {randomColor} from '../common/colorizer';
 import {ConvertTrace, ConvertTraceToPprof} from '../controller/trace_converter';
+import {ASYNC_SLICE_TRACK_KIND} from '../tracks/async_slices/common';
+import {COUNTER_TRACK_KIND} from '../tracks/counter/common';
+import {DEBUG_SLICE_TRACK_KIND} from '../tracks/debug_slices/common';
+import {HEAP_PROFILE_TRACK_KIND} from '../tracks/heap_profile/common';
+import {
+  PROCESS_SCHEDULING_TRACK_KIND
+} from '../tracks/process_scheduling/common';
+import {PROCESS_SUMMARY_TRACK} from '../tracks/process_summary/common';
 
 import {DEFAULT_VIEWING_OPTION} from './flamegraph_util';
 import {
@@ -47,6 +55,7 @@ export interface AddTrackArgs {
   engineId: string;
   kind: string;
   name: string;
+  isMainThread?: boolean;
   trackGroup?: string;
   config: {};
 }
@@ -162,7 +171,7 @@ export const StateActions = {
 
   addTrack(state: StateDraft, args: {
     id?: string; engineId: string; kind: string; name: string;
-    trackGroup?: string; config: {};
+    trackGroup?: string; config: {}; isMainThread: boolean;
   }): void {
     const id = args.id !== undefined ? args.id : `${state.nextId++}`;
     state.tracks[id] = {
@@ -170,6 +179,7 @@ export const StateActions = {
       engineId: args.engineId,
       kind: args.kind,
       name: args.name,
+      isMainThread: args.isMainThread,
       trackGroup: args.trackGroup,
       config: args.config,
     };
@@ -195,6 +205,73 @@ export const StateActions = {
       collapsed: args.collapsed,
       tracks: [args.summaryTrackId],
     };
+  },
+
+  addDebugTrack(state: StateDraft, args: {engineId: string, name: string}):
+      void {
+        if (state.debugTrackId !== undefined) return;
+        const trackId = `${state.nextId++}`;
+        state.debugTrackId = trackId;
+        this.addTrack(state, {
+          id: trackId,
+          engineId: args.engineId,
+          kind: DEBUG_SLICE_TRACK_KIND,
+          name: args.name,
+          isMainThread: false,
+          trackGroup: SCROLLING_TRACK_GROUP,
+          config: {
+            maxDepth: 1,
+          }
+        });
+        this.toggleTrackPinned(state, {trackId});
+      },
+
+  removeDebugTrack(state: StateDraft, _: {}): void {
+    const {debugTrackId} = state;
+    if (debugTrackId === undefined) return;
+    delete state.tracks[debugTrackId];
+    state.scrollingTracks =
+        state.scrollingTracks.filter(id => id !== debugTrackId);
+    state.pinnedTracks = state.pinnedTracks.filter(id => id !== debugTrackId);
+    state.debugTrackId = undefined;
+  },
+
+  sortThreadTracks(state: StateDraft, _: {}): void {
+    const threadTrackOrder = [
+      PROCESS_SCHEDULING_TRACK_KIND,
+      PROCESS_SUMMARY_TRACK,
+      HEAP_PROFILE_TRACK_KIND,
+      COUNTER_TRACK_KIND,
+      ASYNC_SLICE_TRACK_KIND
+    ];
+    for (const group of Object.values(state.trackGroups)) {
+      group.tracks.sort((a: string, b: string) => {
+        const aKind = threadTrackOrder.indexOf(state.tracks[a].kind);
+        const bKind = threadTrackOrder.indexOf(state.tracks[b].kind);
+        const aName = state.tracks[a].name.toLocaleLowerCase();
+        const bName = state.tracks[b].name.toLocaleLowerCase();
+        if (aKind === bKind) {
+          if (state.tracks[a].isMainThread && state.tracks[b].isMainThread) {
+            return 0;
+          } else if (state.tracks[a].isMainThread) {
+            return -1;
+          } else if (state.tracks[b].isMainThread) {
+            return 1;
+          }
+          if (aName > bName) {
+            return 1;
+          } else if (aName === bName) {
+            return 0;
+          } else {
+            return -1;
+          }
+        } else {
+          if (aKind === -1) return 1;
+          if (bKind === -1) return -1;
+          return aKind - bKind;
+        }
+      });
+    }
   },
 
   updateAggregateSorting(
@@ -297,6 +374,14 @@ export const StateActions = {
         const trackGroup = assertExists(state.trackGroups[id]);
         trackGroup.collapsed = !trackGroup.collapsed;
       },
+
+  requestTrackReload(state: StateDraft, _: {}) {
+    if (state.lastTrackReloadRequest) {
+      state.lastTrackReloadRequest++;
+    } else {
+      state.lastTrackReloadRequest = 1;
+    }
+  },
 
   setEngineReady(
       state: StateDraft,
@@ -702,7 +787,34 @@ export const StateActions = {
 
   setAnalyzePageQuery(state: StateDraft, args: {query: string}): void {
     state.analyzePageQuery = args.query;
-  }
+  },
+
+  requestSelectedMetric(state: StateDraft, _: {}): void {
+    if (!state.metrics.availableMetrics) throw Error('No metrics available');
+    if (state.metrics.selectedIndex === undefined) {
+      throw Error('No metric selected');
+    }
+    state.metrics.requestedMetric =
+        state.metrics.availableMetrics[state.metrics.selectedIndex];
+  },
+
+  resetMetricRequest(state: StateDraft, args: {name: string}): void {
+    if (state.metrics.requestedMetric !== args.name) return;
+    state.metrics.requestedMetric = undefined;
+  },
+
+  setAvailableMetrics(state: StateDraft, args: {metrics: string[]}): void {
+    state.metrics.availableMetrics = args.metrics;
+    if (args.metrics.length > 0) state.metrics.selectedIndex = 0;
+  },
+
+  setMetricSelectedIndex(state: StateDraft, args: {index: number}): void {
+    if (!state.metrics.availableMetrics ||
+        args.index >= state.metrics.availableMetrics.length) {
+      throw Error('metric selection out of bounds');
+    }
+    state.metrics.selectedIndex = args.index;
+  },
 };
 
 // When we are on the frontend side, we don't really want to execute the

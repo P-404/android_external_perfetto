@@ -250,25 +250,20 @@ std::shared_ptr<Client> Client::CreateAndHandshake(
     return nullptr;
   }
 
-  PERFETTO_DCHECK(client_config.interval >= 1);
   sock.SetBlocking(false);
-  Sampler sampler{client_config.interval};
   // note: the shared_ptr will retain a copy of the unhooked_allocator
   return std::allocate_shared<Client>(unhooked_allocator, std::move(sock),
                                       client_config, std::move(shmem.value()),
-                                      std::move(sampler), getpid(),
-                                      GetMainThreadStackRange());
+                                      getpid(), GetMainThreadStackRange());
 }
 
 Client::Client(base::UnixSocketRaw sock,
                ClientConfiguration client_config,
                SharedRingBuffer shmem,
-               Sampler sampler,
                pid_t pid_at_creation,
                StackRange main_thread_stack_range)
     : client_config_(client_config),
       max_shmem_tries_(GetMaxTries(client_config_)),
-      sampler_(std::move(sampler)),
       sock_(std::move(sock)),
       main_thread_stack_range_(main_thread_stack_range),
       shmem_(std::move(shmem)),
@@ -290,7 +285,8 @@ Client::~Client() {
 
 const char* Client::GetStackEnd(const char* stackptr) {
   StackRange thread_stack_range;
-  if (IsMainThread()) {
+  bool is_main_thread = IsMainThread();
+  if (is_main_thread) {
     thread_stack_range = main_thread_stack_range_;
   } else {
     thread_stack_range = GetThreadStackRange();
@@ -301,6 +297,13 @@ const char* Client::GetStackEnd(const char* stackptr) {
   StackRange sigalt_stack_range = GetSigAltStackRange();
   if (Contained(sigalt_stack_range, stackptr)) {
     return sigalt_stack_range.end;
+  }
+  // The main thread might have expanded since we read its bounds. We now know
+  // it is not the sigaltstack, so it has to be the main stack.
+  // TODO(fmayer): We should reparse maps here, because now we will keep
+  //               hitting the slow-path that calls the sigaltstack syscall.
+  if (is_main_thread && stackptr < thread_stack_range.end) {
+    return thread_stack_range.end;
   }
   return nullptr;
 }
