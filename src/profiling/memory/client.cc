@@ -407,12 +407,16 @@ bool Client::RecordMalloc(uint32_t heap_id,
   if (SendWireMessageWithRetriesIfBlocking(msg) == -1)
     return false;
 
+  if (!shmem_.GetAndResetReaderPaused())
+    return true;
   return SendControlSocketByte();
 }
 
 int64_t Client::SendWireMessageWithRetriesIfBlocking(const WireMessage& msg) {
   for (uint64_t i = 0;
        max_shmem_tries_ == kInfiniteTries || i < max_shmem_tries_; ++i) {
+    if (shmem_.shutting_down())
+      return -1;
     int64_t res = SendWireMessage(&shmem_, msg);
     if (PERFETTO_LIKELY(res >= 0))
       return res;
@@ -490,7 +494,11 @@ bool Client::SendControlSocketByte() {
   // is how the service signals the tracing session was torn down.
   if (sock_.Send(kSingleByte, sizeof(kSingleByte)) == -1 &&
       !base::IsAgain(errno)) {
-    PERFETTO_PLOG("Failed to send control socket byte.");
+    if (shmem_.shutting_down()) {
+      PERFETTO_LOG("Profiling session ended.");
+    } else {
+      PERFETTO_PLOG("Failed to send control socket byte.");
+    }
     return false;
   }
   return true;

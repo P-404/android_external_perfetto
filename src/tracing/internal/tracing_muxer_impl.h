@@ -115,6 +115,7 @@ class TracingMuxerImpl : public TracingMuxer {
   void StartDataSource(TracingBackendId, DataSourceInstanceID);
   void StopDataSource_AsyncBegin(TracingBackendId, DataSourceInstanceID);
   void StopDataSource_AsyncEnd(TracingBackendId, DataSourceInstanceID);
+  void SyncProducersForTesting();
 
   // Consumer-side bookkeeping methods.
   void SetupTracingSession(TracingSessionGlobalID,
@@ -130,6 +131,17 @@ class TracingMuxerImpl : public TracingMuxer {
                      TracingSession::GetTraceStatsCallback);
   void QueryServiceState(TracingSessionGlobalID,
                          TracingSession::QueryServiceStateCallback);
+
+  // Sets the batching period to |batch_commits_duration_ms| on the backends
+  // with type |backend_type|.
+  void SetBatchCommitsDurationForTesting(uint32_t batch_commits_duration_ms,
+                                         BackendType backend_type);
+
+  // Enables direct SMB patching on the backends with type |backend_type| (see
+  // SharedMemoryArbiter::EnableDirectSMBPatching). Returns true if the
+  // operation succeeded for all backends with type |backend_type|, false
+  // otherwise.
+  bool EnableDirectSMBPatchingForTesting(BackendType backend_type);
 
  private:
   // For each TracingBackend we create and register one ProducerImpl instance.
@@ -205,7 +217,10 @@ class TracingMuxerImpl : public TracingMuxer {
   // tracing sessions.
   class ConsumerImpl : public Consumer {
    public:
-    ConsumerImpl(TracingMuxerImpl*, TracingBackendId, TracingSessionGlobalID);
+    ConsumerImpl(TracingMuxerImpl*,
+                 BackendType,
+                 TracingBackendId,
+                 TracingSessionGlobalID);
     ~ConsumerImpl() override;
 
     void Initialize(std::unique_ptr<ConsumerEndpoint> endpoint);
@@ -213,7 +228,7 @@ class TracingMuxerImpl : public TracingMuxer {
     // perfetto::Consumer implementation.
     void OnConnect() override;
     void OnDisconnect() override;
-    void OnTracingDisabled() override;
+    void OnTracingDisabled(const std::string& error) override;
     void OnTraceData(std::vector<TracePacket>, bool has_more) override;
     void OnDetach(bool success) override;
     void OnAttach(bool success, const TraceConfig&) override;
@@ -227,6 +242,7 @@ class TracingMuxerImpl : public TracingMuxer {
     void Disconnect();
 
     TracingMuxerImpl* const muxer_;
+    BackendType const backend_type_;
     TracingBackendId const backend_id_;
     TracingSessionGlobalID const session_id_;
     bool connected_ = false;

@@ -16,7 +16,6 @@
 
 #include "test/test_helper.h"
 
-#include "perfetto/ext/traced/traced.h"
 #include "perfetto/ext/tracing/core/trace_packet.h"
 #include "perfetto/ext/tracing/ipc/default_socket.h"
 #include "perfetto/tracing/core/tracing_service_state.h"
@@ -55,7 +54,7 @@ void TestHelper::OnDisconnect() {
   PERFETTO_FATAL("Consumer unexpectedly disconnected from the service");
 }
 
-void TestHelper::OnTracingDisabled() {
+void TestHelper::OnTracingDisabled(const std::string& /*error*/) {
   std::move(on_stop_tracing_callback_)();
 }
 
@@ -79,9 +78,13 @@ void TestHelper::OnTraceData(std::vector<TracePacket> packets, bool has_more) {
   }
 }
 
+void TestHelper::StartService() {
+  service_thread_.Start();
+}
+
 void TestHelper::StartServiceIfRequired() {
 #if PERFETTO_BUILDFLAG(PERFETTO_START_DAEMONS)
-  service_thread_.Start();
+  StartService();
 #endif
 }
 

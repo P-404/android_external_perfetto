@@ -26,6 +26,7 @@ import {
   isAndroidP,
   isAndroidTarget,
   isChromeTarget,
+  isCrOSTarget,
   RecordingTarget
 } from '../common/state';
 import {MAX_TIME, RecordMode} from '../common/state';
@@ -110,6 +111,7 @@ FTRACE_CATEGORIES.set('sync/*', 'sync');
 FTRACE_CATEGORIES.set('task/*', 'task');
 FTRACE_CATEGORIES.set('task/*', 'task');
 FTRACE_CATEGORIES.set('vmscan/*', 'vmscan');
+FTRACE_CATEGORIES.set('fastrpc/*', 'fastrpc');
 
 function RecSettings(cssClass: string) {
   const S = (x: number) => x * 1000;
@@ -1018,6 +1020,9 @@ function RecordingNotes() {
     case 'C':
       if (!globals.state.extensionInstalled) notes.push(msgChrome);
       break;
+    case 'CrOS':
+      if (!globals.state.extensionInstalled) notes.push(msgChrome);
+      break;
     default:
   }
   if (globals.state.recordConfig.mode === 'LONG_TRACE') {
@@ -1277,39 +1282,40 @@ function recordMenu(routePage: string) {
                 m('.sub', 'Manage local configs'))) :
             null),
       m('header', 'Probes'),
-      m('ul', isChromeTarget(target) ? [chromeProbe] : [
-        m('a[href="#!/record?p=cpu"]',
-          m(`li${routePage === 'cpu' ? '.active' : ''}`,
-            m('i.material-icons', 'subtitles'),
-            m('.title', 'CPU'),
-            m('.sub', 'CPU usage, scheduling, wakeups'))),
-        m('a[href="#!/record?p=gpu"]',
-          m(`li${routePage === 'gpu' ? '.active' : ''}`,
-            m('i.material-icons', 'aspect_ratio'),
-            m('.title', 'GPU'),
-            m('.sub', 'GPU frequency, memory'))),
-        m('a[href="#!/record?p=power"]',
-          m(`li${routePage === 'power' ? '.active' : ''}`,
-            m('i.material-icons', 'battery_charging_full'),
-            m('.title', 'Power'),
-            m('.sub', 'Battery and other energy counters'))),
-        m('a[href="#!/record?p=memory"]',
-          m(`li${routePage === 'memory' ? '.active' : ''}`,
-            m('i.material-icons', 'memory'),
-            m('.title', 'Memory'),
-            m('.sub', 'Physical mem, VM, LMK'))),
-        m('a[href="#!/record?p=android"]',
-          m(`li${routePage === 'android' ? '.active' : ''}`,
-            m('i.material-icons', 'android'),
-            m('.title', 'Android apps & svcs'),
-            m('.sub', 'atrace and logcat'))),
-        chromeProbe,
-        m('a[href="#!/record?p=advanced"]',
-          m(`li${routePage === 'advanced' ? '.active' : ''}`,
-            m('i.material-icons', 'settings'),
-            m('.title', 'Advanced settings'),
-            m('.sub', 'Complicated stuff for wizards')))
-      ]));
+      m('ul',
+        isChromeTarget(target) && !isCrOSTarget(target) ? [chromeProbe] : [
+          m('a[href="#!/record?p=cpu"]',
+            m(`li${routePage === 'cpu' ? '.active' : ''}`,
+              m('i.material-icons', 'subtitles'),
+              m('.title', 'CPU'),
+              m('.sub', 'CPU usage, scheduling, wakeups'))),
+          m('a[href="#!/record?p=gpu"]',
+            m(`li${routePage === 'gpu' ? '.active' : ''}`,
+              m('i.material-icons', 'aspect_ratio'),
+              m('.title', 'GPU'),
+              m('.sub', 'GPU frequency, memory'))),
+          m('a[href="#!/record?p=power"]',
+            m(`li${routePage === 'power' ? '.active' : ''}`,
+              m('i.material-icons', 'battery_charging_full'),
+              m('.title', 'Power'),
+              m('.sub', 'Battery and other energy counters'))),
+          m('a[href="#!/record?p=memory"]',
+            m(`li${routePage === 'memory' ? '.active' : ''}`,
+              m('i.material-icons', 'memory'),
+              m('.title', 'Memory'),
+              m('.sub', 'Physical mem, VM, LMK'))),
+          m('a[href="#!/record?p=android"]',
+            m(`li${routePage === 'android' ? '.active' : ''}`,
+              m('i.material-icons', 'android'),
+              m('.title', 'Android apps & svcs'),
+              m('.sub', 'atrace and logcat'))),
+          chromeProbe,
+          m('a[href="#!/record?p=advanced"]',
+            m(`li${routePage === 'advanced' ? '.active' : ''}`,
+              m('i.material-icons', 'settings'),
+              m('.title', 'Advanced settings'),
+              m('.sub', 'Complicated stuff for wizards')))
+        ]));
 }
 
 

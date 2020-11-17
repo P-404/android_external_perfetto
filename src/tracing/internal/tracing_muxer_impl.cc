@@ -189,9 +189,13 @@ void TracingMuxerImpl::ProducerImpl::SweepDeadServices() {
 
 // ----- Begin of TracingMuxerImpl::ConsumerImpl
 TracingMuxerImpl::ConsumerImpl::ConsumerImpl(TracingMuxerImpl* muxer,
+                                             BackendType backend_type,
                                              TracingBackendId backend_id,
                                              TracingSessionGlobalID session_id)
-    : muxer_(muxer), backend_id_(backend_id), session_id_(session_id) {}
+    : muxer_(muxer),
+      backend_type_(backend_type),
+      backend_id_(backend_id),
+      session_id_(session_id) {}
 
 TracingMuxerImpl::ConsumerImpl::~ConsumerImpl() = default;
 
@@ -233,6 +237,19 @@ void TracingMuxerImpl::ConsumerImpl::OnConnect() {
 
 void TracingMuxerImpl::ConsumerImpl::OnDisconnect() {
   PERFETTO_DCHECK_THREAD(thread_checker_);
+#if PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
+  if (!connected_ && backend_type_ == kSystemBackend) {
+    PERFETTO_ELOG(
+        "Unable to connect to the system tracing service as a consumer. On "
+        "Android, use the \"perfetto\" command line tool instead to start "
+        "system-wide tracing sessions");
+  }
+#endif  // PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
+  // Make sure the client doesn't hang in a blocking start/stop because of the
+  // disconnection.
+  NotifyStartComplete();
+  NotifyStopComplete();
+
   // It shouldn't be necessary to call StopTracingSession. If we get this call
   // it means that the service did shutdown before us, so there is no point
   // trying it to ask it to stop the session. We should just remember to cleanup
@@ -262,9 +279,12 @@ void TracingMuxerImpl::ConsumerImpl::Disconnect() {
   service_.reset();
 }
 
-void TracingMuxerImpl::ConsumerImpl::OnTracingDisabled() {
+void TracingMuxerImpl::ConsumerImpl::OnTracingDisabled(
+    const std::string& error) {
   PERFETTO_DCHECK_THREAD(thread_checker_);
   PERFETTO_DCHECK(!stopped_);
+  if (!error.empty())
+    PERFETTO_ELOG("Service error: %s", error.c_str());
   stopped_ = true;
   // If we're still waiting for the start event, fire it now. This may happen if
   // there are no active data sources in the session.
@@ -428,6 +448,11 @@ void TracingMuxerImpl::TracingSessionImpl::StartBlocking() {
   base::WaitableEvent tracing_started;
   muxer->task_runner_->PostTask([muxer, session_id, &tracing_started] {
     auto* consumer = muxer->FindConsumer(session_id);
+    if (!consumer) {
+      // TODO(skyostil): Signal an error to the user.
+      tracing_started.Notify();
+      return;
+    }
     PERFETTO_DCHECK(!consumer->blocking_start_complete_callback_);
     consumer->blocking_start_complete_callback_ = [&] {
       tracing_started.Notify();
@@ -453,6 +478,11 @@ void TracingMuxerImpl::TracingSessionImpl::StopBlocking() {
   base::WaitableEvent tracing_stopped;
   muxer->task_runner_->PostTask([muxer, session_id, &tracing_stopped] {
     auto* consumer = muxer->FindConsumer(session_id);
+    if (!consumer) {
+      // TODO(skyostil): Signal an error to the user.
+      tracing_stopped.Notify();
+      return;
+    }
     PERFETTO_DCHECK(!consumer->blocking_stop_complete_callback_);
     consumer->blocking_stop_complete_callback_ = [&] {
       tracing_stopped.Notify();
@@ -801,6 +831,31 @@ void TracingMuxerImpl::StopDataSource_AsyncEnd(
   producer->SweepDeadServices();
 }
 
+void TracingMuxerImpl::SyncProducersForTesting() {
+  std::mutex mutex;
+  std::condition_variable cv;
+  size_t countdown = std::numeric_limits<size_t>::max();
+
+  task_runner_->PostTask([this, &mutex, &cv, &countdown] {
+    {
+      std::unique_lock<std::mutex> countdown_lock(mutex);
+      countdown = backends_.size();
+    }
+    for (auto& backend : backends_) {
+      backend.producer->service_->Sync([&mutex, &cv, &countdown] {
+        std::unique_lock<std::mutex> countdown_lock(mutex);
+        countdown--;
+        cv.notify_one();
+      });
+    }
+  });
+
+  {
+    std::unique_lock<std::mutex> countdown_lock(mutex);
+    cv.wait(countdown_lock, [&countdown] { return !countdown; });
+  }
+}
+
 void TracingMuxerImpl::DestroyStoppedTraceWritersForCurrentThread() {
   // Iterate across all possible data source types.
   auto cur_generation = generation_.load(std::memory_order_acquire);
@@ -980,8 +1035,12 @@ void TracingMuxerImpl::ReadTracingSessionData(
     std::function<void(TracingSession::ReadTraceCallbackArgs)> callback) {
   PERFETTO_DCHECK_THREAD(thread_checker_);
   auto* consumer = FindConsumer(session_id);
-  if (!consumer)
+  if (!consumer) {
+    // TODO(skyostil): Signal an error to the user.
+    TracingSession::ReadTraceCallbackArgs callback_arg{};
+    callback(callback_arg);
     return;
+  }
   PERFETTO_DCHECK(!consumer->read_trace_callback_);
   consumer->read_trace_callback_ = std::move(callback);
   consumer->service_->ReadBuffers();
@@ -1032,6 +1091,31 @@ void TracingMuxerImpl::QueryServiceState(
     callback(std::move(callback_arg));
   };
   consumer->service_->QueryServiceState(std::move(callback_wrapper));
+}
+
+void TracingMuxerImpl::SetBatchCommitsDurationForTesting(
+    uint32_t batch_commits_duration_ms,
+    BackendType backend_type) {
+  for (RegisteredBackend& backend : backends_) {
+    if (backend.producer && backend.producer->connected_ &&
+        backend.type == backend_type) {
+      backend.producer->service_->MaybeSharedMemoryArbiter()
+          ->SetBatchCommitsDuration(batch_commits_duration_ms);
+    }
+  }
+}
+
+bool TracingMuxerImpl::EnableDirectSMBPatchingForTesting(
+    BackendType backend_type) {
+  for (RegisteredBackend& backend : backends_) {
+    if (backend.producer && backend.producer->connected_ &&
+        backend.type == backend_type &&
+        !backend.producer->service_->MaybeSharedMemoryArbiter()
+             ->EnableDirectSMBPatching()) {
+      return false;
+    }
+  }
+  return true;
 }
 
 TracingMuxerImpl::ConsumerImpl* TracingMuxerImpl::FindConsumer(
@@ -1143,7 +1227,7 @@ std::unique_ptr<TracingSession> TracingMuxerImpl::CreateTracingSession(
         continue;
 
       backend.consumers.emplace_back(
-          new ConsumerImpl(this, backend.id, session_id));
+          new ConsumerImpl(this, backend.type, backend.id, session_id));
       auto& consumer = backend.consumers.back();
       TracingBackend::ConnectConsumerArgs conn_args;
       conn_args.consumer = consumer.get();

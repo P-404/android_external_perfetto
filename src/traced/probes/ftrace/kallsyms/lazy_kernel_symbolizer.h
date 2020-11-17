@@ -46,9 +46,15 @@ class LazyKernelSymbolizer {
   // Returns |instance_|, creating it if doesn't exist or was destroyed.
   KernelSymbolMap* GetOrCreateKernelSymbolMap();
 
+  bool is_valid() const { return !!symbol_map_; }
+
   // Destroys the |symbol_map_| freeing up memory. A further call to
   // GetOrCreateKernelSymbolMap() will create it again.
   void Destroy();
+
+  // Exposed for testing.
+  static bool CanReadKernelSymbolAddresses(
+      const char* ksyms_path_for_testing = nullptr);
 
  private:
   std::unique_ptr<KernelSymbolMap> symbol_map_;
