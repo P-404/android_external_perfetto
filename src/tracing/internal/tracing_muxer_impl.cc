@@ -46,9 +46,6 @@ namespace internal {
 
 namespace {
 
-// Maximum number of times we will try to reconnect producer backend.
-constexpr int kMaxProducerReconnections = 100;
-
 class StopArgsImpl : public DataSourceBase::StopArgs {
  public:
   std::function<void()> HandleStopAsynchronously() const override {
@@ -245,6 +242,10 @@ void TracingMuxerImpl::ConsumerImpl::OnDisconnect() {
         "system-wide tracing sessions");
   }
 #endif  // PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
+
+  // Notify the client about disconnection.
+  NotifyError(TracingError{TracingError::kDisconnected, "Peer disconnected"});
+
   // Make sure the client doesn't hang in a blocking start/stop because of the
   // disconnection.
   NotifyStartComplete();
@@ -255,8 +256,6 @@ void TracingMuxerImpl::ConsumerImpl::OnDisconnect() {
   // trying it to ask it to stop the session. We should just remember to cleanup
   // the consumer vector.
   connected_ = false;
-
-  // TODO notify the client somehow.
 
   // Notify the muxer that it is safe to destroy |this|. This is needed because
   // the ConsumerEndpoint stored in |service_| requires that |this| be safe to
@@ -283,9 +282,11 @@ void TracingMuxerImpl::ConsumerImpl::OnTracingDisabled(
     const std::string& error) {
   PERFETTO_DCHECK_THREAD(thread_checker_);
   PERFETTO_DCHECK(!stopped_);
-  if (!error.empty())
-    PERFETTO_ELOG("Service error: %s", error.c_str());
   stopped_ = true;
+
+  if (!error.empty())
+    NotifyError(TracingError{TracingError::kTracingFailed, error});
+
   // If we're still waiting for the start event, fire it now. This may happen if
   // there are no active data sources in the session.
   NotifyStartComplete();
@@ -302,6 +303,14 @@ void TracingMuxerImpl::ConsumerImpl::NotifyStartComplete() {
     muxer_->task_runner_->PostTask(
         std::move(blocking_start_complete_callback_));
     blocking_start_complete_callback_ = nullptr;
+  }
+}
+
+void TracingMuxerImpl::ConsumerImpl::NotifyError(const TracingError& error) {
+  PERFETTO_DCHECK_THREAD(thread_checker_);
+  if (error_callback_) {
+    muxer_->task_runner_->PostTask(
+        std::bind(std::move(error_callback_), error));
   }
 }
 
@@ -509,6 +518,19 @@ void TracingMuxerImpl::TracingSessionImpl::SetOnStartCallback(
   muxer->task_runner_->PostTask([muxer, session_id, cb] {
     auto* consumer = muxer->FindConsumer(session_id);
     consumer->start_complete_callback_ = cb;
+  });
+}
+
+// Can be called from any thread
+void TracingMuxerImpl::TracingSessionImpl::SetOnErrorCallback(
+    std::function<void(TracingError)> cb) {
+  auto* muxer = muxer_;
+  auto session_id = session_id_;
+  muxer->task_runner_->PostTask([muxer, session_id, cb] {
+    auto* consumer = muxer->FindConsumer(session_id);
+    if (!consumer)
+      return;
+    consumer->error_callback_ = cb;
   });
 }
 
@@ -1144,6 +1166,10 @@ void TracingMuxerImpl::OnConsumerDisconnected(ConsumerImpl* consumer) {
   }
 }
 
+void TracingMuxerImpl::SetMaxProducerReconnectionsForTesting(uint32_t count) {
+  max_producer_reconnections_.store(count);
+}
+
 void TracingMuxerImpl::OnProducerDisconnected(ProducerImpl* producer) {
   PERFETTO_DCHECK_THREAD(thread_checker_);
   for (RegisteredBackend& backend : backends_) {
@@ -1151,7 +1177,7 @@ void TracingMuxerImpl::OnProducerDisconnected(ProducerImpl* producer) {
       continue;
     // Try reconnecting the disconnected producer. If the connection succeeds,
     // all the data sources will be automatically re-registered.
-    if (producer->connection_id_ > kMaxProducerReconnections) {
+    if (producer->connection_id_ > max_producer_reconnections_.load()) {
       // Avoid reconnecting a failing producer too many times. Instead we just
       // leak the producer instead of trying to avoid further complicating
       // cross-thread trace writer creation.

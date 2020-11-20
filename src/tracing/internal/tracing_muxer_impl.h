@@ -143,6 +143,8 @@ class TracingMuxerImpl : public TracingMuxer {
   // otherwise.
   bool EnableDirectSMBPatchingForTesting(BackendType backend_type);
 
+  void SetMaxProducerReconnectionsForTesting(uint32_t count);
+
  private:
   // For each TracingBackend we create and register one ProducerImpl instance.
   // This talks to the producer-side of the service, gets start/stop requests
@@ -236,6 +238,7 @@ class TracingMuxerImpl : public TracingMuxer {
     void OnObservableEvents(const ObservableEvents&) override;
 
     void NotifyStartComplete();
+    void NotifyError(const TracingError&);
     void NotifyStopComplete();
 
     // Will eventually inform the |muxer_| when it is safe to remove |this|.
@@ -277,6 +280,10 @@ class TracingMuxerImpl : public TracingMuxer {
     // An internal callback used to implement StartBlocking().
     std::function<void()> blocking_start_complete_callback_;
 
+    // If the API client passes a callback to get notification about the
+    // errors, we should invoke this when NotifyError() is invoked.
+    std::function<void(TracingError)> error_callback_;
+
     // If the API client passes a callback to stop, we should invoke this when
     // OnTracingDisabled() is invoked.
     std::function<void()> stop_complete_callback_;
@@ -313,6 +320,7 @@ class TracingMuxerImpl : public TracingMuxer {
     void Start() override;
     void StartBlocking() override;
     void SetOnStartCallback(std::function<void()>) override;
+    void SetOnErrorCallback(std::function<void(TracingError)>) override;
     void Stop() override;
     void StopBlocking() override;
     void ReadTrace(ReadTraceCallback) override;
@@ -368,6 +376,10 @@ class TracingMuxerImpl : public TracingMuxer {
   std::vector<RegisteredBackend> backends_;
 
   std::atomic<TracingSessionGlobalID> next_tracing_session_id_{};
+
+  // Maximum number of times we will try to reconnect producer backend.
+  // Should only be modified for testing purposes.
+  std::atomic<uint32_t> max_producer_reconnections_{100u};
 
   PERFETTO_THREAD_CHECKER(thread_checker_)
 };

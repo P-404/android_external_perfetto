@@ -369,6 +369,20 @@ __attribute__((noreturn)) void HeapprofdProducer::TerminateProcess(
 
 void HeapprofdProducer::OnTracingSetup() {}
 
+void HeapprofdProducer::WriteRejectedConcurrentSession(BufferID buffer_id,
+                                                       pid_t pid) {
+  auto trace_writer = endpoint_->CreateTraceWriter(buffer_id);
+  auto trace_packet = trace_writer->NewTracePacket();
+  trace_packet->set_timestamp(
+      static_cast<uint64_t>(base::GetBootTimeNs().count()));
+  auto profile_packet = trace_packet->set_profile_packet();
+  auto process_dump = profile_packet->add_process_dumps();
+  process_dump->set_pid(static_cast<uint64_t>(pid));
+  process_dump->set_rejected_concurrent(true);
+  trace_packet->Finalize();
+  trace_writer->Flush();
+}
+
 void HeapprofdProducer::SetupDataSource(DataSourceInstanceID id,
                                         const DataSourceConfig& ds_config) {
   PERFETTO_DLOG("Setting up data source.");
@@ -417,16 +431,7 @@ void HeapprofdProducer::SetupDataSource(DataSourceInstanceID id,
 
       // Manually write one ProfilePacket about the rejected session.
       auto buffer_id = static_cast<BufferID>(ds_config.target_buffer());
-      auto trace_writer = endpoint_->CreateTraceWriter(buffer_id);
-      auto trace_packet = trace_writer->NewTracePacket();
-      trace_packet->set_timestamp(
-          static_cast<uint64_t>(base::GetBootTimeNs().count()));
-      auto profile_packet = trace_packet->set_profile_packet();
-      auto process_dump = profile_packet->add_process_dumps();
-      process_dump->set_pid(static_cast<uint64_t>(target_process_.pid));
-      process_dump->set_rejected_concurrent(true);
-      trace_packet->Finalize();
-      trace_writer->Flush();
+      WriteRejectedConcurrentSession(buffer_id, target_process_.pid);
       return;
     }
   }
@@ -652,8 +657,11 @@ void HeapprofdProducer::ShutdownDataSource(DataSource* data_source) {
 
 void HeapprofdProducer::DoContinuousDump(DataSourceInstanceID id,
                                          uint32_t dump_interval) {
-  if (!DumpProcessesInDataSource(id))
+  auto it = data_sources_.find(id);
+  if (it == data_sources_.end())
     return;
+  DataSource& data_source = it->second;
+  DumpProcessesInDataSource(&data_source);
   auto weak_producer = weak_factory_.GetWeakPtr();
   task_runner_->PostDelayedTask(
       [weak_producer, id, dump_interval] {
@@ -721,58 +729,27 @@ void HeapprofdProducer::DumpProcessState(DataSource* data_source,
                          std::move(new_heapsamples),
                          &data_source->intern_state);
 
-    if (process_state->page_idle_checker) {
-      PageIdleChecker& page_idle_checker = *process_state->page_idle_checker;
-      heap_tracker.GetAllocations([&dump_state, &page_idle_checker](
-                                      uint64_t addr, uint64_t,
-                                      uint64_t alloc_size,
-                                      uint64_t callstack_id) {
-        int64_t idle =
-            page_idle_checker.OnIdlePage(addr, static_cast<size_t>(alloc_size));
-        if (idle < 0) {
-          PERFETTO_PLOG("OnIdlePage.");
-          return;
-        }
-        if (idle > 0)
-          dump_state.AddIdleBytes(callstack_id, static_cast<uint64_t>(idle));
-      });
-    }
-
     heap_tracker.GetCallstackAllocations(
         [&dump_state,
          &data_source](const HeapTracker::CallstackAllocations& alloc) {
           dump_state.WriteAllocation(alloc, data_source->config.dump_at_max());
         });
-    if (process_state->page_idle_checker)
-      process_state->page_idle_checker->MarkPagesIdle();
     dump_state.DumpCallstacks(&callsites_);
   }
 }
 
-bool HeapprofdProducer::DumpProcessesInDataSource(DataSourceInstanceID id) {
-  auto it = data_sources_.find(id);
-  if (it == data_sources_.end()) {
-    PERFETTO_LOG(
-        "Data source not found (harmless if using continuous_dump_config).");
-    return false;
-  }
-  DataSource& data_source = it->second;
-
+void HeapprofdProducer::DumpProcessesInDataSource(DataSource* ds) {
   for (std::pair<const pid_t, ProcessState>& pid_and_process_state :
-       data_source.process_states) {
+       ds->process_states) {
     pid_t pid = pid_and_process_state.first;
     ProcessState& process_state = pid_and_process_state.second;
-    DumpProcessState(&data_source, pid, &process_state);
+    DumpProcessState(ds, pid, &process_state);
   }
-
-  return true;
 }
 
 void HeapprofdProducer::DumpAll() {
-  for (const auto& id_and_data_source : data_sources_) {
-    if (!DumpProcessesInDataSource(id_and_data_source.first))
-      PERFETTO_DLOG("Failed to dump %" PRIu64, id_and_data_source.first);
-  }
+  for (auto& id_and_data_source : data_sources_)
+    DumpProcessesInDataSource(&id_and_data_source.second);
 }
 
 void HeapprofdProducer::Flush(FlushRequestID flush_id,
@@ -859,9 +836,7 @@ void HeapprofdProducer::SocketDelegate::OnDataAvailable(
   char buf[1];
   self->Receive(buf, sizeof(buf), fds, base::ArraySize(fds));
 
-  static_assert(kHandshakeSize == 3, "change if and else if below.");
-  // We deliberately do not check for fds[kHandshakePageIdle] so we can
-  // degrade gracefully on kernels that do not have the file yet.
+  static_assert(kHandshakeSize == 2, "change if and else if below.");
   if (fds[kHandshakeMaps] && fds[kHandshakeMem]) {
     auto ds_it =
         producer_->data_sources_.find(pending_process.data_source_instance_id);
@@ -877,23 +852,10 @@ void HeapprofdProducer::SocketDelegate::OnDataAvailable(
       return;
     }
 
-    auto it_and_inserted = data_source.process_states.emplace(
+    data_source.process_states.emplace(
         std::piecewise_construct, std::forward_as_tuple(self->peer_pid()),
         std::forward_as_tuple(&producer_->callsites_,
                               data_source.config.dump_at_max()));
-
-    ProcessState& process_state = it_and_inserted.first->second;
-    if (data_source.config.idle_allocations()) {
-      if (fds[kHandshakePageIdle]) {
-        process_state.page_idle_checker =
-            PageIdleChecker(std::move(fds[kHandshakePageIdle]));
-      } else {
-        PERFETTO_ELOG(
-            "Idle page tracking requested but did not receive "
-            "page_idle file. Continuing without idle page tracking. Please "
-            "check your kernel version.");
-      }
-    }
 
     PERFETTO_DLOG("%d: Received FDs.", self->peer_pid());
     int raw_fd = pending_process.shmem.fd();
@@ -919,8 +881,7 @@ void HeapprofdProducer::SocketDelegate::OnDataAvailable(
     producer_->UnwinderForPID(self->peer_pid())
         .PostHandoffSocket(std::move(handoff_data));
     producer_->pending_processes_.erase(it);
-  } else if (fds[kHandshakeMaps] || fds[kHandshakeMem] ||
-             fds[kHandshakePageIdle]) {
+  } else if (fds[kHandshakeMaps] || fds[kHandshakeMem]) {
     PERFETTO_DFATAL_OR_ELOG("%d: Received partial FDs.", self->peer_pid());
     producer_->pending_processes_.erase(it);
   } else {
@@ -1228,12 +1189,12 @@ void HeapprofdProducer::CheckDataSourceCpu() {
       },
       kGuardrailIntervalMs);
 
-  bool any_guardrail = false;
-  for (auto& id_and_ds : data_sources_) {
-    DataSource& ds = id_and_ds.second;
-    if (ds.config.max_heapprofd_cpu_secs() > 0)
-      any_guardrail = true;
-  }
+  bool any_guardrail = std::any_of(
+      data_sources_.begin(), data_sources_.end(),
+      [](const std::pair<const DataSourceInstanceID, DataSource>& id_and_ds) {
+        const DataSource& ds = id_and_ds.second;
+        return ds.config.max_heapprofd_cpu_secs() > 0;
+      });
 
   if (!any_guardrail)
     return;
@@ -1274,12 +1235,12 @@ void HeapprofdProducer::CheckDataSourceMemory() {
       },
       kGuardrailIntervalMs);
 
-  bool any_guardrail = false;
-  for (auto& id_and_ds : data_sources_) {
-    DataSource& ds = id_and_ds.second;
-    if (ds.config.max_heapprofd_memory_kb() > 0)
-      any_guardrail = true;
-  }
+  bool any_guardrail = std::any_of(
+      data_sources_.begin(), data_sources_.end(),
+      [](const std::pair<const DataSourceInstanceID, DataSource>& id_and_ds) {
+        const DataSource& ds = id_and_ds.second;
+        return ds.config.max_heapprofd_memory_kb() > 0;
+      });
 
   if (!any_guardrail)
     return;

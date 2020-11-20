@@ -59,6 +59,7 @@
 #include "protos/perfetto/trace/test_event.gen.h"
 #include "protos/perfetto/trace/test_event.pbzero.h"
 #include "protos/perfetto/trace/trace.gen.h"
+#include "protos/perfetto/trace/trace.pbzero.h"
 #include "protos/perfetto/trace/trace_packet.gen.h"
 #include "protos/perfetto/trace/trace_packet.pbzero.h"
 #include "protos/perfetto/trace/track_event/chrome_process_descriptor.gen.h"
@@ -359,6 +360,8 @@ class PerfettoApiTest : public ::testing::TestWithParam<perfetto::BackendType> {
     // service restarting above. Wait for all producers to connect again before
     // proceeding with the test.
     perfetto::test::SyncProducers();
+
+    perfetto::test::DisableReconnectLimit();
   }
 
   void TearDown() override { instance = nullptr; }
@@ -1688,6 +1691,59 @@ TEST_P(PerfettoApiTest, TrackEventScoped) {
                   "E", "B:test.TestEvent", "B:test.AnotherEvent", "E", "E"));
 }
 
+// A class similar to what Protozero generates for extended message.
+class TestTrackEvent : public perfetto::protos::pbzero::TrackEvent {
+ public:
+  static const int field_number = 9901;
+
+  void set_extension_value(int value) {
+    // 9900-10000 is the range of extension field numbers reserved for testing.
+    AppendTinyVarInt(field_number, value);
+  }
+};
+
+TEST_P(PerfettoApiTest, ExtensionClass) {
+  auto* tracing_session = NewTraceWithCategories({"test"});
+  tracing_session->get()->StartBlocking();
+
+  {
+    TRACE_EVENT("test", "TestEventWithExtensionArgs",
+                [&](perfetto::EventContext ctx) {
+                  ctx.event<TestTrackEvent>()->set_extension_value(42);
+                });
+  }
+
+  perfetto::TrackEvent::Flush();
+  tracing_session->get()->StopBlocking();
+
+  std::vector<char> raw_trace = tracing_session->get()->ReadTraceBlocking();
+  EXPECT_GE(raw_trace.size(), 0u);
+
+  bool found_extension = false;
+  perfetto::protos::pbzero::Trace_Decoder trace(
+      reinterpret_cast<uint8_t*>(raw_trace.data()), raw_trace.size());
+
+  for (auto it = trace.packet(); it; ++it) {
+    perfetto::protos::pbzero::TracePacket_Decoder packet(it->data(),
+                                                         it->size());
+
+    if (!packet.has_track_event())
+      continue;
+
+    auto track_event = packet.track_event();
+    protozero::ProtoDecoder decoder(track_event.data, track_event.size);
+
+    for (protozero::Field f = decoder.ReadField(); f.valid();
+         f = decoder.ReadField()) {
+      if (f.id() == TestTrackEvent::field_number) {
+        found_extension = true;
+      }
+    }
+  }
+
+  EXPECT_TRUE(found_extension);
+}
+
 TEST_P(PerfettoApiTest, TrackEventInstant) {
   // Create a new trace session.
   auto* tracing_session = NewTraceWithCategories({"test"});
@@ -2450,6 +2506,34 @@ TEST_P(PerfettoApiTest, OnStartCallback) {
   tracing_session->get()->StopBlocking();
 }
 
+TEST_P(PerfettoApiTest, OnErrorCallback) {
+  perfetto::TraceConfig cfg;
+
+  // Requesting too long |duration_ms| will cause EnableTracing() to fail.
+  cfg.set_duration_ms(static_cast<uint32_t>(-1));
+  cfg.add_buffers()->set_size_kb(1024);
+  auto* ds_cfg = cfg.add_data_sources()->mutable_config();
+  ds_cfg->set_name("track_event");
+  auto* tracing_session = NewTrace(cfg);
+
+  WaitableTestEvent got_error;
+  tracing_session->get()->SetOnErrorCallback([&](perfetto::TracingError error) {
+    EXPECT_EQ(perfetto::TracingError::kTracingFailed, error.code);
+    EXPECT_FALSE(error.message.empty());
+    got_error.Notify();
+  });
+
+  tracing_session->get()->Start();
+  got_error.Wait();
+
+  // Registered error callback will be triggered also by OnDisconnect()
+  // function. This may happen after exiting this test what would result in
+  // system crash (|got_error| will not exist at that time). To prevent that
+  // scenario, error callback has to be cleared.
+  tracing_session->get()->SetOnErrorCallback(nullptr);
+  tracing_session->get()->StopBlocking();
+}
+
 TEST_P(PerfettoApiTest, GetTraceStats) {
   perfetto::TraceConfig cfg;
   cfg.set_duration_ms(500);
@@ -2487,6 +2571,7 @@ TEST_P(PerfettoApiTest, QueryServiceState) {
   class QueryTestDataSource : public perfetto::DataSource<QueryTestDataSource> {
   };
   RegisterDataSource<QueryTestDataSource>("query_test_data_source");
+  perfetto::test::SyncProducers();
 
   auto tracing_session =
       perfetto::Tracing::NewTrace(/*BackendType=*/GetParam());
