@@ -607,6 +607,19 @@ class PerfettoApiTest : public ::testing::TestWithParam<perfetto::BackendType> {
     return slices;
   }
 
+  uint32_t GetMainThreadPacketSequenceId(
+      const perfetto::protos::gen::Trace& trace) {
+    for (const auto& packet : trace.packet()) {
+      if (packet.has_track_descriptor() &&
+          packet.track_descriptor().thread().tid() ==
+              static_cast<int32_t>(perfetto::base::GetThreadId())) {
+        return packet.trusted_packet_sequence_id();
+      }
+    }
+    ADD_FAILURE() << "Main thread not found";
+    return 0;
+  }
+
   std::map<std::string, TestDataSourceHandle> data_sources_;
   std::list<TestTracingSessionHandle> sessions_;  // Needs stable pointers.
 };
@@ -647,6 +660,16 @@ void MockDataSource::OnStop(const StopArgs& args) {
 // -------------
 // Test fixtures
 // -------------
+
+TEST_P(PerfettoApiTest, StartAndStopWithoutDataSources) {
+  // Create a new trace session without any data sources configured.
+  perfetto::TraceConfig cfg;
+  cfg.add_buffers()->set_size_kb(1024);
+  auto* tracing_session = NewTrace(cfg);
+  // This should not timeout.
+  tracing_session->get()->StartBlocking();
+  tracing_session->get()->StopBlocking();
+}
 
 TEST_P(PerfettoApiTest, TrackEventStartStopAndDestroy) {
   // This test used to cause a use after free as the tracing session got
@@ -693,6 +716,59 @@ TEST_P(PerfettoApiTest, TrackEventStartStopAndStopBlocking) {
   for (auto& session : sessions) {
     session->StopBlocking();
   }
+}
+
+TEST_P(PerfettoApiTest, ChangeTraceConfiguration) {
+  // Setup the trace config.
+  perfetto::TraceConfig trace_config;
+  trace_config.set_duration_ms(2000);
+  trace_config.add_buffers()->set_size_kb(1024);
+  auto* data_source = trace_config.add_data_sources();
+
+  // Configure track events with category "foo".
+  auto* ds_cfg = data_source->mutable_config();
+  ds_cfg->set_name("track_event");
+  perfetto::protos::gen::TrackEventConfig te_cfg;
+  te_cfg.add_disabled_categories("*");
+  te_cfg.add_enabled_categories("foo");
+  ds_cfg->set_track_event_config_raw(te_cfg.SerializeAsString());
+
+  // Initially, exclude all producers (the client library's producer is named
+  // after current process's name, which will not match
+  // "all_producers_excluded").
+  data_source->add_producer_name_filter("all_producers_excluded");
+
+  auto* tracing_session = NewTrace(trace_config);
+
+  tracing_session->get()->StartBlocking();
+
+  // Emit a first trace event, this one should be filtered out due
+  // to the mismatching producer name filter.
+  TRACE_EVENT_BEGIN("foo", "EventFilteredOut");
+  TRACE_EVENT_END("foo");
+
+  // Remove the producer name filter by changing configs.
+  data_source->clear_producer_name_filter();
+  tracing_session->get()->ChangeTraceConfig(trace_config);
+
+  // We don't have a blocking version of ChangeTraceConfig, because there is
+  // currently no response to it from producers or the service. Instead, we sync
+  // the consumer and producer IPC streams for this test, to ensure that the
+  // producer_name_filter change has propagated.
+  tracing_session->get()->GetTraceStatsBlocking();  // sync consumer stream.
+  perfetto::test::SyncProducers();                  // sync producer stream.
+
+  // Emit a second trace event, this one should be included because
+  // the producer name filter was cleared.
+  TRACE_EVENT_BEGIN("foo", "EventIncluded");
+  TRACE_EVENT_END("foo");
+  tracing_session->get()->StopBlocking();
+
+  // Verify that only the second event is in the trace data.
+  std::vector<char> raw_trace = tracing_session->get()->ReadTraceBlocking();
+  std::string trace(raw_trace.data(), raw_trace.size());
+  EXPECT_THAT(trace, Not(HasSubstr("EventFilteredOut")));
+  EXPECT_THAT(trace, HasSubstr("EventIncluded"));
 }
 
 // This is a build-only regression test that checks you can have a track event
@@ -1130,10 +1206,10 @@ TEST_P(PerfettoApiTest, TrackEventProcessAndThreadDescriptors) {
 
   std::vector<perfetto::protos::gen::TrackDescriptor> descs;
   std::vector<perfetto::protos::gen::TrackDescriptor> thread_descs;
-  constexpr uint32_t kMainThreadSequence = 2;
+  uint32_t main_thread_sequence = GetMainThreadPacketSequenceId(trace);
   for (const auto& packet : trace.packet()) {
     if (packet.has_track_descriptor()) {
-      if (packet.trusted_packet_sequence_id() == kMainThreadSequence) {
+      if (packet.trusted_packet_sequence_id() == main_thread_sequence) {
         descs.push_back(packet.track_descriptor());
       } else {
         thread_descs.push_back(packet.track_descriptor());
@@ -1185,6 +1261,8 @@ TEST_P(PerfettoApiTest, CustomTrackDescriptor) {
   auto track = perfetto::ProcessTrack::Current();
   auto desc = track.Serialize();
   desc.mutable_process()->set_process_name("testing.exe");
+  desc.mutable_thread()->set_tid(
+      static_cast<int32_t>(perfetto::base::GetThreadId()));
   desc.mutable_chrome_process()->set_process_priority(123);
   perfetto::TrackEvent::SetTrackDescriptor(track, std::move(desc));
   perfetto::TrackEvent::Flush();
@@ -1195,10 +1273,10 @@ TEST_P(PerfettoApiTest, CustomTrackDescriptor) {
   perfetto::protos::gen::Trace trace;
   ASSERT_TRUE(trace.ParseFromArray(raw_trace.data(), raw_trace.size()));
 
-  constexpr uint32_t kMainThreadSequence = 2;
+  uint32_t main_thread_sequence = GetMainThreadPacketSequenceId(trace);
   bool found_desc = false;
   for (const auto& packet : trace.packet()) {
-    if (packet.trusted_packet_sequence_id() != kMainThreadSequence)
+    if (packet.trusted_packet_sequence_id() != main_thread_sequence)
       continue;
     if (packet.has_track_descriptor()) {
       auto td = packet.track_descriptor();
@@ -1255,7 +1333,7 @@ TEST_P(PerfettoApiTest, TrackEventCustomTrack) {
 
   // Check that the track uuids match on the begin and end events.
   const auto track = perfetto::Track(async_id);
-  constexpr uint32_t kMainThreadSequence = 2;
+  uint32_t main_thread_sequence = GetMainThreadPacketSequenceId(trace);
   int event_count = 0;
   bool found_descriptor = false;
   for (const auto& packet : trace.packet()) {
@@ -1275,10 +1353,10 @@ TEST_P(PerfettoApiTest, TrackEventCustomTrack) {
     auto track_event = packet.track_event();
     if (track_event.type() ==
         perfetto::protos::gen::TrackEvent::TYPE_SLICE_BEGIN) {
-      EXPECT_EQ(kMainThreadSequence, packet.trusted_packet_sequence_id());
+      EXPECT_EQ(main_thread_sequence, packet.trusted_packet_sequence_id());
       EXPECT_EQ(track.uuid, track_event.track_uuid());
     } else {
-      EXPECT_NE(kMainThreadSequence, packet.trusted_packet_sequence_id());
+      EXPECT_NE(main_thread_sequence, packet.trusted_packet_sequence_id());
       EXPECT_EQ(track.uuid, track_event.track_uuid());
     }
     event_count++;
@@ -2118,6 +2196,56 @@ TEST_P(PerfettoApiTest, OneDataSourceOneEvent) {
   EXPECT_TRUE(test_packet_found);
 }
 
+TEST_P(PerfettoApiTest, ConsumerFlush) {
+  auto* data_source = &data_sources_["my_data_source"];
+
+  // Setup the trace config.
+  perfetto::TraceConfig cfg;
+  cfg.add_buffers()->set_size_kb(1024);
+  auto* ds_cfg = cfg.add_data_sources()->mutable_config();
+  ds_cfg->set_name("my_data_source");
+  ds_cfg->set_legacy_config("test config");
+
+  // Create a new trace session.
+  auto* tracing_session = NewTrace(cfg);
+
+  tracing_session->get()->Start();
+  data_source->on_start.Wait();
+
+  MockDataSource::Trace([&](MockDataSource::TraceContext ctx) {
+    auto packet = ctx.NewTracePacket();
+    packet->set_timestamp(42);
+    packet->set_for_testing()->set_str("flushed event");
+    packet->Finalize();
+
+    // The SMB scraping logic will skip the last packet because it cannot
+    // guarantee it's finalized. Create an empty packet so we get the
+    // previous one and this empty one is ignored.
+    packet = ctx.NewTracePacket();
+  });
+
+  EXPECT_TRUE(tracing_session->get()->FlushBlocking());
+
+  // Deliberately doing ReadTraceBlocking() before StopBlocking() to avoid
+  // hitting the auto scrape-on-stop behavior of the service.
+  std::vector<char> raw_trace = tracing_session->get()->ReadTraceBlocking();
+  tracing_session->get()->StopBlocking();
+
+  ASSERT_GE(raw_trace.size(), 0u);
+  perfetto::protos::gen::Trace trace;
+  ASSERT_TRUE(trace.ParseFromArray(raw_trace.data(), raw_trace.size()));
+  bool test_packet_found = false;
+  for (const auto& packet : trace.packet()) {
+    if (!packet.has_for_testing())
+      continue;
+    EXPECT_FALSE(test_packet_found);
+    EXPECT_EQ(packet.timestamp(), 42U);
+    EXPECT_EQ(packet.for_testing().str(), "flushed event");
+    test_packet_found = true;
+  }
+  EXPECT_TRUE(test_packet_found);
+}
+
 TEST_P(PerfettoApiTest, WithBatching) {
   auto* data_source = &data_sources_["my_data_source"];
 
@@ -2209,6 +2337,7 @@ TEST_P(PerfettoApiTest, BlockingStartAndStop) {
   perfetto::DataSourceDescriptor dsd;
   dsd.set_name("my_data_source2");
   MockDataSource2::Register(dsd);
+  perfetto::test::SyncProducers();
 
   // Setup the trace config.
   perfetto::TraceConfig cfg;
@@ -2361,6 +2490,7 @@ TEST_P(PerfettoApiTest, MultipleRegistrations) {
   perfetto::DataSourceDescriptor dsd;
   dsd.set_name("my_data_source");
   EXPECT_TRUE(MockDataSource::Register(dsd));
+  perfetto::test::SyncProducers();
 
   // Setup the trace config.
   perfetto::TraceConfig cfg;
@@ -2388,6 +2518,7 @@ TEST_P(PerfettoApiTest, CustomIncrementalState) {
   perfetto::DataSourceDescriptor dsd;
   dsd.set_name("incr_data_source");
   TestIncrementalDataSource::Register(dsd);
+  perfetto::test::SyncProducers();
 
   // Setup the trace config.
   perfetto::TraceConfig cfg;

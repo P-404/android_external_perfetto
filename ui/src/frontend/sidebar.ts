@@ -14,10 +14,11 @@
 
 import * as m from 'mithril';
 
-import {assertTrue} from '../base/logging';
+import {assertExists, assertTrue} from '../base/logging';
 import {Actions} from '../common/actions';
 import {QueryResponse} from '../common/queries';
 import {EngineMode, TraceArrayBufferSource} from '../common/state';
+import * as version from '../gen/perfetto_version';
 
 import {Animation} from './animation';
 import {copyToClipboard} from './clipboard';
@@ -484,7 +485,7 @@ function navigateViewer(e: Event) {
 
 function shareTrace(e: Event) {
   e.preventDefault();
-  const engine = globals.state.engines[0];
+  const engine = assertExists(Object.values(globals.state.engines)[0]);
   const traceUrl = (engine.source as (TraceArrayBufferSource)).url || '';
 
   // If the trace is not shareable (has been pushed via postMessage()) but has
@@ -690,6 +691,16 @@ const SidebarFooter: m.Component = {
             'assessment')),
         m(EngineRPCWidget),
         m(ServiceWorkerWidget),
+        m(
+            '.version',
+            m('a',
+              {
+                href: `https://github.com/google/perfetto/tree/${
+                    version.SCM_REVISION}/ui`,
+                target: '_blank',
+              },
+              `${version.VERSION}`),
+            ),
     );
   }
 };

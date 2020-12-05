@@ -46,9 +46,9 @@ ConsumerIPCClientImpl::ConsumerIPCClientImpl(const char* service_sock_name,
                                              Consumer* consumer,
                                              base::TaskRunner* task_runner)
     : consumer_(consumer),
-      ipc_channel_(ipc::Client::CreateInstance(service_sock_name,
-                                               /*retry=*/false,
-                                               task_runner)),
+      ipc_channel_(
+          ipc::Client::CreateInstance({service_sock_name, /*retry=*/false},
+                                      task_runner)),
       consumer_port_(this /* event_listener */),
       weak_ptr_factory_(this) {
   ipc_channel_->BindService(consumer_port_.GetWeakPtr());
@@ -91,7 +91,7 @@ void ConsumerIPCClientImpl::EnableTracing(const TraceConfig& trace_config,
   consumer_port_.EnableTracing(req, std::move(async_response), *fd);
 }
 
-void ConsumerIPCClientImpl::ChangeTraceConfig(const TraceConfig&) {
+void ConsumerIPCClientImpl::ChangeTraceConfig(const TraceConfig& trace_config) {
   if (!connected_) {
     PERFETTO_DLOG(
         "Cannot ChangeTraceConfig(), not connected to tracing service");
@@ -105,6 +105,7 @@ void ConsumerIPCClientImpl::ChangeTraceConfig(const TraceConfig&) {
           PERFETTO_DLOG("ChangeTraceConfig() failed");
       });
   protos::gen::ChangeTraceConfigRequest req;
+  *req.mutable_trace_config() = trace_config;
   consumer_port_.ChangeTraceConfig(req, std::move(async_response));
 }
 
