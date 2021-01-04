@@ -239,6 +239,7 @@ void SetProtoType(FtraceFieldType ftrace_type,
     case kFtraceUint64:
     case kFtraceInode32:
     case kFtraceInode64:
+    case kFtraceSymAddr64:
       *proto_type = ProtoSchemaType::kUint64;
       *proto_field_id = GenericFtraceEvent::Field::kUintValueFieldNumber;
       break;
@@ -284,6 +285,15 @@ bool InferFtraceType(const std::string& type_and_name,
   }
   if (Contains(type_and_name, "char * ")) {
     *out = kFtraceStringPtr;
+    return true;
+  }
+
+  // Kernel addresses that need symbolization via kallsyms. Only 64-bit kernels
+  // are supported for now. 32-bit kernels seems to be going away.
+  if ((base::StartsWith(type_and_name, "void*") ||
+       base::StartsWith(type_and_name, "void *")) &&
+      size == 8) {
+    *out = kFtraceSymAddr64;
     return true;
   }
 
@@ -414,7 +424,7 @@ std::unique_ptr<ProtoTranslationTable> ProtoTranslationTable::Create(
     if (contents.empty() || !ParseFtraceEvent(contents, &ftrace_event)) {
       if (!strcmp(event.group, "ftrace") && !strcmp(event.name, "print")) {
         // On some "user" builds of Android <P the ftrace/print event is not
-        // selinux-whitelisted. Thankfully this event is an always-on built-in
+        // selinux-allowed. Thankfully this event is an always-on built-in
         // so we don't need to write to its 'enable' file. However we need to
         // know its binary layout to decode it, so we hardcode it.
         ftrace_event.id = 5;  // Seems quite stable across kernels.

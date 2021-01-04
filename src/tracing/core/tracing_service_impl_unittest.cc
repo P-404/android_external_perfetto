@@ -62,6 +62,7 @@ using ::testing::Not;
 using ::testing::Property;
 using ::testing::StrictMock;
 using ::testing::StringMatchResultListener;
+using ::testing::StrNe;
 
 namespace perfetto {
 
@@ -706,16 +707,18 @@ TEST_F(TracingServiceImplTest, StartTracingTriggerMultipleTraces) {
   auto checkpoint_name = "on_tracing_disabled_consumer_1_and_2";
   auto on_tracing_disabled = task_runner.CreateCheckpoint(checkpoint_name);
   std::atomic<size_t> counter(0);
-  EXPECT_CALL(*consumer_1, OnTracingDisabled()).WillOnce(Invoke([&]() {
-    if (++counter == 2u) {
-      on_tracing_disabled();
-    }
-  }));
-  EXPECT_CALL(*consumer_2, OnTracingDisabled()).WillOnce(Invoke([&]() {
-    if (++counter == 2u) {
-      on_tracing_disabled();
-    }
-  }));
+  EXPECT_CALL(*consumer_1, OnTracingDisabled(_))
+      .WillOnce(InvokeWithoutArgs([&]() {
+        if (++counter == 2u) {
+          on_tracing_disabled();
+        }
+      }));
+  EXPECT_CALL(*consumer_2, OnTracingDisabled(_))
+      .WillOnce(InvokeWithoutArgs([&]() {
+        if (++counter == 2u) {
+          on_tracing_disabled();
+        }
+      }));
 
   EXPECT_CALL(*producer, StopDataSource(id1));
   EXPECT_CALL(*producer, StopDataSource(id2));
@@ -2775,9 +2778,9 @@ TEST_F(TracingServiceImplTest, AbortIfTraceDurationIsTooLong) {
   EXPECT_CALL(*producer, SetupDataSource(_, _)).Times(0);
   consumer->EnableTracing(trace_config);
 
-  // The trace is aborted immediately, 5s here is just some slack for the thread
-  // ping-pongs for slow devices.
-  consumer->WaitForTracingDisabled(5000);
+  // The trace is aborted immediately, the default timeout here is just some
+  // slack for the thread ping-pongs for slow devices.
+  consumer->WaitForTracingDisabled();
 }
 
 TEST_F(TracingServiceImplTest, GetTraceStats) {
@@ -3326,14 +3329,15 @@ TEST_F(TracingServiceImplTest, LimitSessionsPerUid) {
 
   // Create a bunch of legit sessions (2 uids * 5 sessions).
   for (int i = 0; i < kMaxConcurrentTracingSessionsPerUid * kUids; i++) {
-    start_new_session(/*uid=*/i % kUids);
+    start_new_session(/*uid=*/static_cast<uid_t>(i) % kUids);
   }
 
   // Any other session now should fail for the two uids.
   for (int i = 0; i <= kUids; i++) {
-    auto* consumer = start_new_session(/*uid=*/i % kUids);
+    auto* consumer = start_new_session(/*uid=*/static_cast<uid_t>(i) % kUids);
     auto on_fail = task_runner.CreateCheckpoint("uid_" + std::to_string(i));
-    EXPECT_CALL(*consumer, OnTracingDisabled()).WillOnce(Invoke(on_fail));
+    EXPECT_CALL(*consumer, OnTracingDisabled(StrNe("")))
+        .WillOnce(InvokeWithoutArgs(on_fail));
   }
 
   // Wait for failure (only after both attempts).

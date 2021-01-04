@@ -379,14 +379,19 @@ void SystemProbesParser::ParseSystemInfo(ConstBytes blob) {
                                              utsname_blob.size);
     base::StringView machine = utsname.machine();
     SyscallTracker* syscall_tracker = SyscallTracker::GetOrCreate(context_);
-    if (machine == "aarch64" || machine == "armv8l") {
+    if (machine == "aarch64") {
       syscall_tracker->SetArchitecture(kAarch64);
+    } else if (machine == "armv8l") {
+      syscall_tracker->SetArchitecture(kArmEabi);
+    } else if (machine == "armv7l") {
+      syscall_tracker->SetArchitecture(kAarch32);
     } else if (machine == "x86_64") {
       syscall_tracker->SetArchitecture(kX86_64);
     } else if (machine == "i686") {
       syscall_tracker->SetArchitecture(kX86);
     } else {
-      PERFETTO_ELOG("Unknown architecture %s", machine.ToStdString().c_str());
+      PERFETTO_ELOG("Unknown architecture %s. Syscall traces will not work.",
+                    machine.ToStdString().c_str());
     }
 
     SystemInfoTracker* system_info_tracker =

@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "perfetto/base/logging.h"
+#include "perfetto/base/status.h"
 #include "perfetto/base/time.h"
 #include "perfetto/ext/base/circular_queue.h"
 #include "perfetto/ext/base/optional.h"
@@ -62,7 +63,7 @@ class TracingServiceImpl : public TracingService {
   struct DataSourceInstance;
 
  public:
-  static constexpr size_t kDefaultShmPageSize = base::kPageSize;
+  static constexpr size_t kDefaultShmPageSize = 4096ul;
   static constexpr size_t kDefaultShmSize = 256 * 1024ul;
   static constexpr size_t kMaxShmSize = 32 * 1024 * 1024ul;
   static constexpr uint32_t kDataSourceStopTimeoutMs = 5000;
@@ -180,7 +181,7 @@ class TracingServiceImpl : public TracingService {
                          uid_t uid);
     ~ConsumerEndpointImpl() override;
 
-    void NotifyOnTracingDisabled();
+    void NotifyOnTracingDisabled(const std::string& error);
     base::WeakPtr<ConsumerEndpointImpl> GetWeakPtr();
 
     // TracingService::ConsumerEndpoint implementation.
@@ -259,12 +260,12 @@ class TracingServiceImpl : public TracingService {
   bool DetachConsumer(ConsumerEndpointImpl*, const std::string& key);
   bool AttachConsumer(ConsumerEndpointImpl*, const std::string& key);
   void DisconnectConsumer(ConsumerEndpointImpl*);
-  bool EnableTracing(ConsumerEndpointImpl*,
-                     const TraceConfig&,
-                     base::ScopedFile);
+  base::Status EnableTracing(ConsumerEndpointImpl*,
+                             const TraceConfig&,
+                             base::ScopedFile);
   void ChangeTraceConfig(ConsumerEndpointImpl*, const TraceConfig&);
 
-  bool StartTracing(TracingSessionID);
+  base::Status StartTracing(TracingSessionID);
   void DisableTracing(TracingSessionID, bool disable_immediately = false);
   void Flush(TracingSessionID tsid,
              uint32_t timeout_ms,
@@ -366,7 +367,8 @@ class TracingServiceImpl : public TracingService {
     uint32_t delay_to_next_write_period_ms() const {
       PERFETTO_DCHECK(write_period_ms > 0);
       return write_period_ms -
-             (base::GetWallTimeMs().count() % write_period_ms);
+             static_cast<uint32_t>(base::GetWallTimeMs().count() %
+                                   write_period_ms);
     }
 
     uint32_t flush_timeout_ms() {

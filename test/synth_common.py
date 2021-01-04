@@ -187,10 +187,12 @@ class Trace(object):
       process.uid = uid
     self.proc_map[pid] = cmdline
 
-  def add_thread(self, tid, tgid, cmdline):
+  def add_thread(self, tid, tgid, cmdline, name=None):
     thread = self.packet.process_tree.threads.add()
     thread.tid = tid
     thread.tgid = tgid
+    if name is not None:
+      thread.name = name
     self.proc_map[tid] = cmdline
 
   def add_battery_counters(self, ts, charge_uah, cap_prct, curr_ua,
@@ -393,11 +395,24 @@ class Trace(object):
       thread.cpu_freq_indices.append(index)
       thread.cpu_freq_ticks.append(freqs[index])
 
-  def add_gpu_mem_total(self, pid, ts, size):
+  def add_gpu_mem_total_ftrace_event(self, pid, ts, size):
     ftrace = self.__add_ftrace_event(ts, pid)
-    gpu_mem_total_event = ftrace.gpu_mem_total
+    gpu_mem_total_ftrace_event = ftrace.gpu_mem_total
+    gpu_mem_total_ftrace_event.pid = pid
+    gpu_mem_total_ftrace_event.size = size
+
+  def add_gpu_mem_total_event(self, pid, ts, size):
+    packet = self.add_packet()
+    packet.timestamp = ts
+    gpu_mem_total_event = packet.gpu_mem_total_event
     gpu_mem_total_event.pid = pid
     gpu_mem_total_event.size = size
+
+  def add_sched_blocked_reason(self, ts, pid, io_wait, unblock_pid):
+    ftrace = self.__add_ftrace_event(ts, unblock_pid)
+    sched_blocked_reason = ftrace.sched_blocked_reason
+    sched_blocked_reason.pid = pid
+    sched_blocked_reason.io_wait = io_wait
 
 
 def create_trace():
