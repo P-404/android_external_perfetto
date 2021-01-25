@@ -50,6 +50,7 @@
 #include "perfetto/tracing/core/data_source_descriptor.h"
 #include "perfetto/tracing/core/trace_config.h"
 #include "perfetto/tracing/core/tracing_service_state.h"
+#include "src/android_stats/statsd_logging_helper.h"
 #include "src/perfetto_cmd/config.h"
 #include "src/perfetto_cmd/packet_writer.h"
 #include "src/perfetto_cmd/pbtxt_to_pb.h"
@@ -133,6 +134,23 @@ bool IsUserBuild() {
 #else
   return false;
 #endif  // PERFETTO_BUILDFLAG(PERFETTO_ANDROID_BUILD)
+}
+
+base::Optional<PerfettoStatsdAtom> ConvertRateLimiterResponseToAtom(
+    RateLimiter::ShouldTraceResponse resp) {
+  switch (resp) {
+    case RateLimiter::kNotAllowedOnUserBuild:
+      return PerfettoStatsdAtom::kCmdUserBuildTracingNotAllowed;
+    case RateLimiter::kFailedToInitState:
+      return PerfettoStatsdAtom::kCmdFailedToInitGuardrailState;
+    case RateLimiter::kInvalidState:
+      return PerfettoStatsdAtom::kCmdInvalidGuardrailState;
+    case RateLimiter::kHitUploadLimit:
+      return PerfettoStatsdAtom::kCmdHitUploadLimit;
+    case RateLimiter::kOkToTrace:
+      return base::nullopt;
+  }
+  PERFETTO_FATAL("For GCC");
 }
 
 }  // namespace
@@ -621,6 +639,8 @@ int PerfettoCmd::Main(int argc, char** argv) {
   // the options.
   if (!triggers_to_activate.empty()) {
     LogUploadEvent(PerfettoStatsdAtom::kTriggerBegin);
+    LogTriggerEvents(PerfettoTriggerAtom::kCmdTrigger, triggers_to_activate);
+
     bool finished_with_success = false;
     TriggerProducer producer(
         &task_runner_,
@@ -634,6 +654,8 @@ int PerfettoCmd::Main(int argc, char** argv) {
       LogUploadEvent(PerfettoStatsdAtom::kTriggerSuccess);
     } else {
       LogUploadEvent(PerfettoStatsdAtom::kTriggerFailure);
+      LogTriggerEvents(PerfettoTriggerAtom::kCmdTriggerFail,
+                       triggers_to_activate);
     }
     return finished_with_success ? 0 : 1;
   }
@@ -660,7 +682,7 @@ int PerfettoCmd::Main(int argc, char** argv) {
 
   RateLimiter::Args args{};
   args.is_user_build = IsUserBuild();
-  args.is_dropbox = is_uploading_;
+  args.is_uploading = is_uploading_;
   args.current_time = base::GetWallTimeS();
   args.ignore_guardrails = ignore_guardrails;
   args.allow_user_build_tracing = trace_config_->allow_user_build_tracing();
@@ -674,7 +696,7 @@ int PerfettoCmd::Main(int argc, char** argv) {
   if (!args.unique_session_name.empty())
     base::MaybeSetThreadName("p-" + args.unique_session_name);
 
-  if (args.is_dropbox && !args.ignore_guardrails &&
+  if (args.is_uploading && !args.ignore_guardrails &&
       (trace_config_->duration_ms() == 0 &&
        trace_config_->trigger_config().trigger_timeout_ms() == 0)) {
     PERFETTO_ELOG("Can't trace indefinitely when tracing to Dropbox.");
@@ -697,8 +719,11 @@ int PerfettoCmd::Main(int argc, char** argv) {
     LogUploadEvent(PerfettoStatsdAtom::kBackgroundTraceBegin);
   }
 
-  if (!limiter.ShouldTrace(args)) {
+  auto err_atom = ConvertRateLimiterResponseToAtom(limiter.ShouldTrace(args));
+  if (err_atom) {
+    // TODO(lalitm): remove this once we're ready on server side.
     LogUploadEvent(PerfettoStatsdAtom::kHitGuardrails);
+    LogUploadEvent(err_atom.value());
     return 1;
   }
 
@@ -988,11 +1013,18 @@ void PerfettoCmd::OnObservableEvents(
     const ObservableEvents& /*observable_events*/) {}
 
 void PerfettoCmd::LogUploadEvent(PerfettoStatsdAtom atom) {
-#if PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
-  LogUploadEventAndroid(atom);
-#else
-  base::ignore_result(atom);
-#endif
+  if (!is_uploading_)
+    return;
+  base::Uuid uuid(uuid_);
+  android_stats::MaybeLogUploadEvent(atom, uuid.lsb(), uuid.msb());
+}
+
+void PerfettoCmd::LogTriggerEvents(
+    PerfettoTriggerAtom atom,
+    const std::vector<std::string>& trigger_names) {
+  if (!is_uploading_)
+    return;
+  android_stats::MaybeLogTriggerEvents(atom, trigger_names);
 }
 
 int __attribute__((visibility("default")))

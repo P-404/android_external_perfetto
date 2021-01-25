@@ -27,7 +27,11 @@ void StatsdLogUploadEvent(PerfettoStatsdAtom atom,
                           int64_t uuid_lsb,
                           int64_t uuid_msb) {
   stats_write(PERFETTO_UPLOADED, static_cast<int32_t>(atom), uuid_lsb,
-              uuid_msb);
+              uuid_msb, "");
+}
+
+void StatsdLogTriggerEvent(PerfettoTriggerAtom atom, const char* trigger_name) {
+  stats_write(PERFETTO_TRIGGER, static_cast<int32_t>(atom), trigger_name);
 }
 
 }  // namespace android_internal

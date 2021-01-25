@@ -1,4 +1,3 @@
-
 /*
  * Copyright (C) 2019 The Android Open Source Project
  *
@@ -27,6 +26,7 @@
 #include "perfetto/base/build_config.h"
 #include "perfetto/base/compiler.h"
 #include "perfetto/base/logging.h"
+#include "perfetto/ext/base/file_utils.h"
 #include "perfetto/ext/base/optional.h"
 #include "perfetto/ext/base/scoped_file.h"
 #include "src/profiling/symbolizer/filesystem.h"
@@ -35,6 +35,8 @@
 namespace perfetto {
 namespace profiling {
 
+// TODO(fmayer): Fix up name. This suggests it always returns a symbolizer or
+// dies, which isn't the case.
 std::unique_ptr<Symbolizer> LocalSymbolizerOrDie(
     std::vector<std::string> binary_path,
     const char* mode) {
@@ -74,7 +76,9 @@ std::unique_ptr<Symbolizer> LocalSymbolizerOrDie(
 #include <sys/types.h>
 
 #if PERFETTO_BUILDFLAG(PERFETTO_OS_WIN)
-#define F_OK 0
+constexpr const char* kDefaultSymbolizer = "llvm-symbolizer.exe";
+#else
+constexpr const char* kDefaultSymbolizer = "llvm-symbolizer";
 #endif
 
 namespace perfetto {
@@ -396,8 +400,7 @@ std::map<std::string, FoundBinary> BuildIdIndex(std::vector<std::string> dirs) {
         PERFETTO_PLOG("Failed to open %s", fname);
         return;
       }
-      ssize_t rd = static_cast<ssize_t>(
-          PERFETTO_EINTR(read(*fd, &magic, sizeof(magic))));
+      ssize_t rd = base::Read(*fd, &magic, sizeof(magic));
       if (rd != sizeof(magic)) {
         PERFETTO_PLOG("Failed to read %s", fname);
         return;
@@ -481,7 +484,7 @@ base::Optional<FoundBinary> LocalBinaryFinder::FindBinary(
 base::Optional<FoundBinary> LocalBinaryFinder::IsCorrectFile(
     const std::string& symbol_file,
     const std::string& build_id) {
-  if (access(symbol_file.c_str(), F_OK) != 0) {
+  if (!base::FileExists(symbol_file)) {
     return base::nullopt;
   }
   // Openfile opens the file with an exclusive lock on windows.
@@ -584,13 +587,13 @@ base::Optional<FoundBinary> LocalBinaryFinder::FindBinaryInRoot(
 
 LocalBinaryFinder::~LocalBinaryFinder() = default;
 
-LLVMSymbolizerProcess::LLVMSymbolizerProcess()
+LLVMSymbolizerProcess::LLVMSymbolizerProcess(const std::string& symbolizer_path)
     :
 #if PERFETTO_BUILDFLAG(PERFETTO_OS_WIN)
-      subprocess_("llvm-symbolizer.exe", {}) {
+      subprocess_(symbolizer_path, {}) {
 }
 #else
-      subprocess_("llvm-symbolizer", {"llvm-symbolizer"}) {
+      subprocess_(symbolizer_path, {"llvm-symbolizer"}) {
 }
 #endif
 
@@ -599,7 +602,7 @@ std::vector<SymbolizedFrame> LLVMSymbolizerProcess::Symbolize(
     uint64_t address) {
   std::vector<SymbolizedFrame> result;
   char buffer[1024];
-  int size = sprintf(buffer, "%s 0x%" PRIx64 "\n", binary.c_str(), address);
+  int size = sprintf(buffer, "\"%s\" 0x%" PRIx64 "\n", binary.c_str(), address);
   if (subprocess_.Write(buffer, static_cast<size_t>(size)) < 0) {
     PERFETTO_ELOG("Failed to write to llvm-symbolizer.");
     return result;
@@ -661,6 +664,13 @@ std::vector<std::vector<SymbolizedFrame>> LocalSymbolizer::Symbolize(
         binary->file_name, address + load_bias_correction));
   return result;
 }
+
+LocalSymbolizer::LocalSymbolizer(const std::string& symbolizer_path,
+                                 std::unique_ptr<BinaryFinder> finder)
+    : llvm_symbolizer_(symbolizer_path), finder_(std::move(finder)) {}
+
+LocalSymbolizer::LocalSymbolizer(std::unique_ptr<BinaryFinder> finder)
+    : LocalSymbolizer(kDefaultSymbolizer, std::move(finder)) {}
 
 LocalSymbolizer::~LocalSymbolizer() = default;
 

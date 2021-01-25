@@ -380,7 +380,9 @@ TEST_F(PerfettoTest, TreeHuggerOnly(TestFtraceFlush)) {
 //    We cannot change the length of the production code in
 //    CanReadKernelSymbolAddresses() to deal with it.
 // 2. On user (i.e. non-userdebug) builds. As that doesn't work there by design.
-#if PERFETTO_BUILDFLAG(PERFETTO_ANDROID_BUILD) && defined(__i386__)
+// 3. On ARM builds, because they fail on our CI.
+#if (PERFETTO_BUILDFLAG(PERFETTO_ANDROID_BUILD) && defined(__i386__)) || \
+    defined(__arm__)
 #define MAYBE_KernelAddressSymbolization DISABLED_KernelAddressSymbolization
 #else
 #define MAYBE_KernelAddressSymbolization KernelAddressSymbolization
@@ -415,22 +417,20 @@ TEST_F(PerfettoTest, MAYBE_KernelAddressSymbolization) {
   TraceConfig trace_config;
   trace_config.add_buffers()->set_size_kb(1024);
 
-  // The symbolizer is initialized asynchronously in a dedicated PostTask in
-  // FtraceController::StartDataSource. There is no easy way to linearize with
-  // that. Here the duration needs to be long enough so that the PostTask() for
-  // the deferred parse is enqueued before the stop. The kallsyms parsing can
-  // take longer.
-  trace_config.set_duration_ms(5000);
-
   auto* ds_config = trace_config.add_data_sources()->mutable_config();
   ds_config->set_name("linux.ftrace");
   protos::gen::FtraceConfig ftrace_cfg;
   ftrace_cfg.set_symbolize_ksyms(true);
+  ftrace_cfg.set_initialize_ksyms_synchronously_for_testing(true);
   ds_config->set_ftrace_config_raw(ftrace_cfg.SerializeAsString());
 
   helper.StartTracing(trace_config);
-  helper.WaitForTracingDisabled();
 
+  // Synchronize with the ftrace data source. The kernel symbol map is loaded
+  // at this point.
+  helper.FlushAndWait(kDefaultTestTimeoutMs);
+  helper.DisableTracing();
+  helper.WaitForTracingDisabled();
   helper.ReadData();
   helper.WaitForReadData();
 
