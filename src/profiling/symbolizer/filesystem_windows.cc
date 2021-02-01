@@ -16,7 +16,8 @@
 
 #include "src/profiling/symbolizer/filesystem.h"
 
-#define WIN32_MEAN_AND_LEAN
+#if PERFETTO_BUILDFLAG(PERFETTO_OS_WIN)
+
 #include <Windows.h>
 
 namespace perfetto {
@@ -52,8 +53,9 @@ bool WalkDirectories(std::vector<std::string> dirs, FileCallback fn) {
 }
 
 size_t GetFileSize(const std::string& file_path) {
-  HANDLE file = CreateFileA(file_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  HANDLE file =
+      CreateFileA(file_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE) {
     PERFETTO_PLOG("Failed to get file size %s", file_path.c_str());
     return 0;
@@ -64,8 +66,10 @@ size_t GetFileSize(const std::string& file_path) {
     PERFETTO_PLOG("Failed to get file size %s", file_path.c_str());
   }
   CloseHandle(file);
-  return file_size.QuadPart;
+  return static_cast<size_t>(file_size.QuadPart);
 }
 
 }  // namespace profiling
 }  // namespace perfetto
+
+#endif  // PERFETTO_BUILDFLAG(PERFETTO_OS_WIN)

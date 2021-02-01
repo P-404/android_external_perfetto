@@ -17,7 +17,8 @@
 
 #include "src/profiling/symbolizer/scoped_read_mmap.h"
 
-#define WIN32_MEAN_AND_LEAN
+#if PERFETTO_BUILDFLAG(PERFETTO_OS_WIN)
+
 #include <Windows.h>
 
 namespace perfetto {
@@ -25,13 +26,13 @@ namespace profiling {
 
 ScopedReadMmap::ScopedReadMmap(const char* fName, size_t length)
     : length_(length), ptr_(nullptr) {
-  file_ = CreateFileA(fName, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
-                      FILE_ATTRIBUTE_NORMAL, NULL);
+  file_ = CreateFileA(fName, GENERIC_READ, FILE_SHARE_READ, nullptr,
+                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file_ == INVALID_HANDLE_VALUE) {
     PERFETTO_DLOG("Failed to open file: %s", fName);
     return;
   }
-  map_ = CreateFileMapping(file_, NULL, PAGE_READONLY, 0, 0, NULL);
+  map_ = CreateFileMapping(file_, nullptr, PAGE_READONLY, 0, 0, nullptr);
   if (map_ == INVALID_HANDLE_VALUE) {
     PERFETTO_DLOG("Failed to mmap file");
     return;
@@ -60,3 +61,5 @@ bool ScopedReadMmap::IsValid() {
 
 }  // namespace profiling
 }  // namespace perfetto
+
+#endif  // PERFETTO_BUILDFLAG(PERFETTO_OS_WIN)

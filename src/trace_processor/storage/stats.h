@@ -155,6 +155,7 @@ namespace stats {
   F(ninja_parse_errors,                 kSingle,  kError,    kTrace,    ""),   \
   F(perf_samples_skipped,               kSingle,  kInfo,     kTrace,    ""),   \
   F(perf_samples_skipped_dataloss,      kSingle,  kDataLoss, kTrace,    ""),   \
+  F(memory_snapshot_parser_failure,     kSingle,  kError,    kAnalysis, ""),   \
   F(thread_time_in_state_out_of_order,  kSingle,  kError,    kAnalysis, ""),   \
   F(thread_time_in_state_unknown_cpu_freq,                                     \
                                         kSingle,  kError,    kAnalysis, ""),   \
@@ -189,7 +190,9 @@ enum Source {
 };
 
 // Ignore GCC warning about a missing argument for a variadic macro parameter.
+#if defined(__GNUC__) || defined(__clang__)
 #pragma GCC system_header
+#endif
 
 // Declares an enum of literals (one for each stat). The enum values of each
 // literal corresponds to the string index in the arrays below.

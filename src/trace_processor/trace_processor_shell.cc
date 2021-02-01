@@ -35,6 +35,7 @@
 #include "perfetto/ext/base/scoped_file.h"
 #include "perfetto/ext/base/string_splitter.h"
 #include "perfetto/ext/base/string_utils.h"
+#include "perfetto/ext/base/version.h"
 #include "perfetto/trace_processor/read_trace.h"
 #include "perfetto/trace_processor/trace_processor.h"
 #include "src/trace_processor/metrics/chrome/all_chrome_metrics.descriptor.h"
@@ -64,12 +65,6 @@
 #include <sys/types.h>
 #endif
 
-#if PERFETTO_BUILDFLAG(PERFETTO_VERSION_GEN)
-#include "perfetto_version.gen.h"
-#else
-#define PERFETTO_GET_GIT_REVISION() "unknown"
-#endif
-
 #if PERFETTO_HAS_SIGNAL_H()
 #include <signal.h>
 #endif
@@ -90,7 +85,7 @@ TraceProcessor* g_tp;
 #if PERFETTO_BUILDFLAG(PERFETTO_TP_LINENOISE)
 
 bool EnsureDir(const std::string& path) {
-  return mkdir(path.c_str(), 0755) != -1 || errno == EEXIST;
+  return base::Mkdir(path) || errno == EEXIST;
 }
 
 bool EnsureFile(const std::string& path) {
@@ -774,7 +769,7 @@ CommandLineOptions ParseCommandLineOptions(int argc, char** argv) {
     OPT_HTTP_PORT,
   };
 
-  static const struct option long_options[] = {
+  static const option long_options[] = {
       {"help", no_argument, nullptr, 'h'},
       {"version", no_argument, nullptr, 'v'},
       {"wide", no_argument, nullptr, 'W'},
@@ -802,7 +797,7 @@ CommandLineOptions ParseCommandLineOptions(int argc, char** argv) {
       break;  // EOF.
 
     if (option == 'v') {
-      printf("%s\n", PERFETTO_GET_GIT_REVISION());
+      printf("%s\n", base::GetVersionString());
       exit(0);
     }
 
