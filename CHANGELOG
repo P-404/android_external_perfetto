@@ -1,14 +1,30 @@
 Unreleased:
   Tracing service and probes:
+    * Added more helpful error messages if the client library is used without
+      having been initialized.
+    * Added //tools/record_android_trace script to facilitate recording traces
+      from Android devices, automating start + stop-via-ctrl+c + pull + open.
+  Trace Processor:
+    *
+  UI:
+    *
+
+
+v11.0 - 2021-01-01:
+  Tracing service and probes:
     * Added trace packet interceptor API for rerouting trace data into
       non-Perfetto systems.
     * Added support for printing track events to the console.
     * Added a way to observe track event tracing sessions starting and
       stopping.
   Trace Processor:
-    *
+    * Added "ancestor_slice" and "experimental_ancestor_stack_profile_callsite"
+      table functions to look up ancestors of CPU stack samples in profiler
+      tables.
+    * Added power metric reporting suspend/resume time periods.
   UI:
-    *
+    * Fixed CPU time calculation in example queries.
+    * Added tracks to debug Android SystemUI jank.
 
 
 v10.0 - 2020-12-01:
