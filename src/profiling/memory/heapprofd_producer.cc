@@ -26,18 +26,27 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include "perfetto/base/compiler.h"
 #include "perfetto/base/logging.h"
 #include "perfetto/ext/base/file_utils.h"
 #include "perfetto/ext/base/optional.h"
+#include "perfetto/ext/base/string_splitter.h"
 #include "perfetto/ext/base/string_utils.h"
 #include "perfetto/ext/base/thread_task_runner.h"
 #include "perfetto/ext/base/watchdog_posix.h"
+#include "perfetto/ext/tracing/core/basic_types.h"
 #include "perfetto/ext/tracing/core/trace_writer.h"
 #include "perfetto/ext/tracing/ipc/producer_ipc_client.h"
 #include "perfetto/tracing/core/data_source_config.h"
 #include "perfetto/tracing/core/data_source_descriptor.h"
+#include "src/profiling/common/profiler_guardrails.h"
 #include "src/profiling/memory/unwound_messages.h"
 #include "src/profiling/memory/wire_protocol.h"
+#include "src/traced/probes/packages_list/packages_list_parser.h"
+
+#if PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
+#include <sys/system_properties.h>
+#endif
 
 namespace perfetto {
 namespace profiling {
@@ -204,25 +213,8 @@ HeapprofdProducer::HeapprofdProducer(HeapprofdMode mode,
       unwinding_workers_(MakeUnwindingWorkers(this, kUnwinderThreads)),
       socket_delegate_(this),
       weak_factory_(this) {
-  auto stat_fd = base::OpenFile("/proc/self/stat", O_RDONLY | O_CLOEXEC);
-  if (!stat_fd) {
-    PERFETTO_ELOG(
-        "Failed to open /proc/self/stat. Cannot accept profiles "
-        "with CPU guardrails.");
-  } else {
-    profiler_cpu_guardrails_.emplace(std::move(stat_fd));
-    CheckDataSourceCpuTask();  // Kick off guardrail task.
-  }
-
-  auto status_fd = base::OpenFile("/proc/self/status", O_RDONLY | O_CLOEXEC);
-  if (!status_fd) {
-    PERFETTO_ELOG(
-        "Failed to open /proc/self/status. Cannot accept profiles "
-        "with memory guardrails.");
-  } else {
-    profiler_memory_guardrails_.emplace(std::move(status_fd));
-    CheckDataSourceMemoryTask();  // Kick off guardrail task.
-  }
+  CheckDataSourceCpuTask();
+  CheckDataSourceMemoryTask();
 }
 
 HeapprofdProducer::~HeapprofdProducer() = default;
@@ -464,19 +456,12 @@ void HeapprofdProducer::SetupDataSource(DataSourceInstanceID id,
 
   base::Optional<uint64_t> start_cputime_sec;
   if (heapprofd_config.max_heapprofd_cpu_secs() > 0) {
-    if (profiler_cpu_guardrails_)
-      start_cputime_sec = profiler_cpu_guardrails_->GetCputimeSec();
+    start_cputime_sec = GetCputimeSecForCurrentProcess();
 
     if (!start_cputime_sec) {
       PERFETTO_ELOG("Failed to enforce CPU guardrail. Rejecting config.");
       return;
     }
-  }
-
-  if (heapprofd_config.has_max_heapprofd_memory_kb() &&
-      !profiler_memory_guardrails_) {
-    PERFETTO_ELOG("Failed to enforce memory guardrail. Rejecting config.");
-    return;
   }
 
   auto buffer_id = static_cast<BufferID>(ds_config.target_buffer());
@@ -486,11 +471,16 @@ void HeapprofdProducer::SetupDataSource(DataSourceInstanceID id,
   if (!HeapprofdConfigToClientConfiguration(heapprofd_config, &cli_config))
     return;
   data_source.config = heapprofd_config;
+  data_source.ds_config = ds_config;
   data_source.normalized_cmdlines = std::move(normalized_cmdlines.value());
   data_source.stop_timeout_ms = ds_config.stop_timeout_ms()
                                     ? ds_config.stop_timeout_ms()
                                     : 5000 /* kDataSourceStopTimeoutMs */;
-  data_source.start_cputime_sec = start_cputime_sec;
+  data_source.guardrail_config.cpu_start_secs = start_cputime_sec;
+  data_source.guardrail_config.memory_guardrail_kb =
+      heapprofd_config.max_heapprofd_memory_kb();
+  data_source.guardrail_config.cpu_guardrail_sec =
+      heapprofd_config.max_heapprofd_cpu_secs();
 
   InterningOutputTracker::WriteFixedInterningsPacket(
       data_source.trace_writer.get());
@@ -504,12 +494,12 @@ void HeapprofdProducer::SetupDataSource(DataSourceInstanceID id,
 }
 
 bool HeapprofdProducer::IsPidProfiled(pid_t pid) {
-  for (const auto& pair : data_sources_) {
-    const DataSource& ds = pair.second;
-    if (ds.process_states.find(pid) != ds.process_states.cend())
-      return true;
-  }
-  return false;
+  return std::any_of(
+      data_sources_.cbegin(), data_sources_.cend(),
+      [pid](const std::pair<const DataSourceInstanceID, DataSource>& p) {
+        const DataSource& ds = p.second;
+        return ds.process_states.count(pid) > 0;
+      });
 }
 
 void HeapprofdProducer::SetStartupProperties(DataSource* data_source) {
@@ -953,6 +943,15 @@ void HeapprofdProducer::HandleClientConnection(
   }
   RecordOtherSourcesAsRejected(data_source, process);
 
+  // In fork mode, right now we check whether the target is not profileable
+  // in the client, because we cannot read packages.list there.
+  if (mode_ == HeapprofdMode::kCentral &&
+      !CanProfile(data_source->ds_config, new_connection->peer_uid())) {
+    PERFETTO_ELOG("%d (%s) is not profileable.", process.pid,
+                  process.cmdline.c_str());
+    return;
+  }
+
   uint64_t shmem_size = data_source->config.shmem_size_bytes();
   if (!shmem_size)
     shmem_size = kDefaultShmemSize;
@@ -1228,12 +1227,14 @@ void HeapprofdProducer::CheckDataSourceCpuTask() {
       },
       kGuardrailIntervalMs);
 
-  PERFETTO_DCHECK(profiler_cpu_guardrails_);
-  profiler_cpu_guardrails_->CheckDataSourceCpu(
-      data_sources_.begin(), data_sources_.end(), [this](DataSource* ds) {
-        ds->hit_guardrail = true;
-        ShutdownDataSource(ds);
-      });
+  ProfilerCpuGuardrails gr;
+  for (auto& p : data_sources_) {
+    DataSource& ds = p.second;
+    if (gr.IsOverCpuThreshold(ds.guardrail_config)) {
+      ds.hit_guardrail = true;
+      ShutdownDataSource(&ds);
+    }
+  }
 }
 
 void HeapprofdProducer::CheckDataSourceMemoryTask() {
@@ -1245,13 +1246,70 @@ void HeapprofdProducer::CheckDataSourceMemoryTask() {
         weak_producer->CheckDataSourceMemoryTask();
       },
       kGuardrailIntervalMs);
+  ProfilerMemoryGuardrails gr;
+  for (auto& p : data_sources_) {
+    DataSource& ds = p.second;
+    if (gr.IsOverMemoryThreshold(ds.guardrail_config)) {
+      ds.hit_guardrail = true;
+      ShutdownDataSource(&ds);
+    }
+  }
+}
 
-  PERFETTO_DCHECK(profiler_memory_guardrails_);
-  profiler_memory_guardrails_->CheckDataSourceMemory(
-      data_sources_.begin(), data_sources_.end(), [this](DataSource* ds) {
-        ds->hit_guardrail = true;
-        ShutdownDataSource(ds);
-      });
+bool CanProfile(const DataSourceConfig& ds_config, uint64_t uid) {
+#if !PERFETTO_BUILDFLAG(PERFETTO_ANDROID_BUILD)
+  base::ignore_result(ds_config);
+  base::ignore_result(uid);
+  return true;
+#else
+  char buf[PROP_VALUE_MAX + 1] = {};
+  int ret = __system_property_get("ro.build.type", buf);
+  PERFETTO_CHECK(ret >= 0);
+  return CanProfileAndroid(ds_config, uid, std::string(buf),
+                           "/data/system/packages.list");
+#endif
+}
+
+bool CanProfileAndroid(const DataSourceConfig& ds_config,
+                       uint64_t uid,
+                       const std::string& build_type,
+                       const std::string& packages_list_path) {
+  // These are replicated constants from libcutils android_filesystem_config.h
+  constexpr auto kAidAppStart = 10000;     // AID_APP_START
+  constexpr auto kAidAppEnd = 19999;       // AID_APP_END
+  constexpr auto kAidUserOffset = 100000;  // AID_USER_OFFSET
+
+  if (build_type != "user") {
+    return true;
+  }
+
+  if (ds_config.enable_extra_guardrails()) {
+    return false;  // no extra guardrails on user builds.
+  }
+
+  uint64_t uid_without_profile = uid % kAidUserOffset;
+  if (uid_without_profile < kAidAppStart || kAidAppEnd < uid_without_profile) {
+    // TODO(fmayer): relax this.
+    return false;  // no native services on user.
+  }
+
+  std::string content;
+  if (!base::ReadFile(packages_list_path, &content)) {
+    PERFETTO_ELOG("Failed to read %s.", packages_list_path.c_str());
+    return false;
+  }
+  for (base::StringSplitter ss(std::move(content), '\n'); ss.Next();) {
+    Package pkg;
+    if (!ReadPackagesListLine(ss.cur_token(), &pkg)) {
+      PERFETTO_ELOG("Failed to parse packages.list.");
+      return false;
+    }
+    if (pkg.uid == uid_without_profile &&
+        (pkg.profileable_from_shell || pkg.debuggable)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace profiling

@@ -30,7 +30,7 @@
 #include "perfetto/ext/base/unix_task_runner.h"
 #include "perfetto/ext/tracing/core/consumer.h"
 #include "perfetto/ext/tracing/ipc/consumer_ipc_client.h"
-#include "src/perfetto_cmd/perfetto_atoms.h"
+#include "src/android_stats/perfetto_atoms.h"
 #include "src/perfetto_cmd/rate_limiter.h"
 
 namespace perfetto {
@@ -79,9 +79,10 @@ class PerfettoCmd : public Consumer {
   static base::ScopedFile OpenDropboxTmpFile();
   void SaveTraceIntoDropboxAndIncidentOrCrash();
   void SaveOutputToIncidentTraceOrCrash();
-  void LogUploadEventAndroid(PerfettoStatsdAtom atom);
 #endif
   void LogUploadEvent(PerfettoStatsdAtom atom);
+  void LogTriggerEvents(PerfettoTriggerAtom atom,
+                        const std::vector<std::string>& trigger_names);
 
   base::UnixTaskRunner task_runner_;
 

@@ -21,6 +21,7 @@
 #include <functional>
 #include <list>
 #include <mutex>
+#include <regex>
 #include <thread>
 #include <vector>
 
@@ -167,6 +168,7 @@ uint64_t ConvertTimestampToTraceTimeNs(const MyTimestamp& timestamp) {
 namespace {
 
 using ::testing::_;
+using ::testing::ContainerEq;
 using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 using ::testing::Invoke;
@@ -235,8 +237,11 @@ class MockDataSource : public perfetto::DataSource<MockDataSource> {
   TestDataSourceHandle* handle_ = nullptr;
 };
 
+constexpr int kTestDataSourceArg = 123;
+
 class MockDataSource2 : public perfetto::DataSource<MockDataSource2> {
  public:
+  MockDataSource2(int arg) { EXPECT_EQ(arg, kTestDataSourceArg); }
   void OnSetup(const SetupArgs&) override {}
   void OnStart(const StartArgs&) override {}
   void OnStop(const StopArgs&) override {}
@@ -2345,7 +2350,7 @@ TEST_P(PerfettoApiTest, BlockingStartAndStop) {
   // Register a second data source to get a bit more coverage.
   perfetto::DataSourceDescriptor dsd;
   dsd.set_name("my_data_source2");
-  MockDataSource2::Register(dsd);
+  MockDataSource2::Register(dsd, kTestDataSourceArg);
   perfetto::test::SyncProducers();
 
   // Setup the trace config.
@@ -2988,7 +2993,8 @@ class TestInterceptor : public perfetto::Interceptor<TestInterceptor> {
     std::map<uint64_t, std::string> event_names;
   };
 
-  TestInterceptor() {
+  TestInterceptor(const std::string& constructor_arg) {
+    EXPECT_EQ(constructor_arg, "Constructor argument");
     // Note: some tests in this suite register multiple track event data
     // sources. We only track data for the first in this test.
     if (!instance)
@@ -3073,7 +3079,7 @@ TestInterceptor* TestInterceptor::instance;
 TEST_P(PerfettoApiTest, TracePacketInterception) {
   perfetto::InterceptorDescriptor desc;
   desc.set_name("test_interceptor");
-  TestInterceptor::Register(desc);
+  TestInterceptor::Register(desc, std::string("Constructor argument"));
 
   perfetto::TraceConfig cfg;
   cfg.set_duration_ms(500);
@@ -3111,6 +3117,253 @@ TEST_P(PerfettoApiTest, TracePacketInterception) {
   EXPECT_THAT(TestInterceptor::instance->events, ElementsAre(long_title));
 
   tracing_session->get()->StopBlocking();
+}
+
+void EmitConsoleEvents() {
+  TRACE_EVENT_INSTANT("foo", "Instant event");
+  TRACE_EVENT("foo", "Scoped event");
+  TRACE_EVENT_BEGIN("foo", "Nested event");
+  TRACE_EVENT_INSTANT("foo", "Instant event");
+  TRACE_EVENT_INSTANT("foo", "Annotated event", "foo", 1, "bar", "hello");
+  TRACE_EVENT_END("foo");
+  uint64_t async_id = 4004;
+  auto track = perfetto::Track(async_id, perfetto::ThreadTrack::Current());
+  perfetto::TrackEvent::SetTrackDescriptor(
+      track, [](perfetto::protos::pbzero::TrackDescriptor* desc) {
+        desc->set_name("AsyncTrack");
+      });
+  TRACE_EVENT_BEGIN("test", "AsyncEvent", track);
+
+  std::thread thread([&] {
+    TRACE_EVENT("foo", "EventFromAnotherThread");
+    TRACE_EVENT_INSTANT("foo", "Instant event");
+    TRACE_EVENT_END("test", track);
+  });
+  thread.join();
+
+  TRACE_EVENT_INSTANT(
+      "foo", "More annotations", [](perfetto::EventContext ctx) {
+        {
+          auto* dbg = ctx.event()->add_debug_annotations();
+          dbg->set_name("dict");
+          auto* nested = dbg->set_nested_value();
+          nested->set_nested_type(
+              perfetto::protos::pbzero::DebugAnnotation::NestedValue::DICT);
+          nested->add_dict_keys("key");
+          auto* value = nested->add_dict_values();
+          value->set_int_value(123);
+        }
+        {
+          auto* dbg = ctx.event()->add_debug_annotations();
+          dbg->set_name("array");
+          auto* nested = dbg->set_nested_value();
+          nested->set_nested_type(
+              perfetto::protos::pbzero::DebugAnnotation::NestedValue::ARRAY);
+          auto* value = nested->add_array_values();
+          value->set_string_value("first");
+          value = nested->add_array_values();
+          value->set_string_value("second");
+        }
+      });
+}
+
+TEST_P(PerfettoApiTest, ConsoleInterceptorPrint) {
+  perfetto::ConsoleInterceptor::Register();
+
+  perfetto::TraceConfig cfg;
+  cfg.set_duration_ms(500);
+  cfg.add_buffers()->set_size_kb(1024);
+  auto* ds_cfg = cfg.add_data_sources()->mutable_config();
+  ds_cfg->set_name("track_event");
+  ds_cfg->mutable_interceptor_config()->set_name("console");
+
+  auto* tracing_session = NewTrace(cfg);
+  tracing_session->get()->StartBlocking();
+  EmitConsoleEvents();
+  tracing_session->get()->StopBlocking();
+}
+
+TEST_P(PerfettoApiTest, ConsoleInterceptorVerify) {
+  perfetto::ConsoleInterceptor::Register();
+
+#if PERFETTO_BUILDFLAG(PERFETTO_OS_ANDROID)
+  char temp_file[] = "/data/local/tmp/perfetto-XXXXXXXX";
+#else
+  char temp_file[] = "/tmp/perfetto-XXXXXXXX";
+#endif
+  int fd = mkstemp(temp_file);
+  ASSERT_TRUE(fd >= 0);
+  perfetto::ConsoleInterceptor::SetOutputFdForTesting(fd);
+
+  perfetto::TraceConfig cfg;
+  cfg.set_duration_ms(500);
+  cfg.add_buffers()->set_size_kb(1024);
+  auto* ds_cfg = cfg.add_data_sources()->mutable_config();
+  ds_cfg->set_name("track_event");
+  ds_cfg->mutable_interceptor_config()->set_name("console");
+
+  auto* tracing_session = NewTrace(cfg);
+  tracing_session->get()->StartBlocking();
+  EmitConsoleEvents();
+  tracing_session->get()->StopBlocking();
+  perfetto::ConsoleInterceptor::SetOutputFdForTesting(0);
+
+  std::vector<std::string> lines;
+  FILE* f = fdopen(fd, "r");
+  fseek(f, 0u, SEEK_SET);
+  std::array<char, 128> line{};
+  while (fgets(line.data(), line.size(), f)) {
+    // Ignore timestamps and process/thread ids.
+    std::string s(line.data() + 28);
+    // Filter out durations.
+    s = std::regex_replace(s, std::regex(" [+][0-9]*ms"), "");
+    lines.push_back(std::move(s));
+  }
+  fclose(f);
+  EXPECT_EQ(0, unlink(temp_file));
+
+  // clang-format off
+  std::vector<std::string> golden_lines = {
+      "foo   Instant event\n",
+      "foo   Scoped event {\n",
+      "foo   -  Nested event {\n",
+      "foo   -  -  Instant event\n",
+      "foo   -  -  Annotated event(foo:1, bar:hello)\n",
+      "foo   -  } Nested event\n",
+      "test  AsyncEvent {\n",
+      "foo   EventFromAnotherThread {\n",
+      "foo   -  Instant event\n",
+      "test  } AsyncEvent\n",
+      "foo   } EventFromAnotherThread\n",
+      "foo   -  More annotations(dict:{key:123}, array:[first, second])\n",
+      "foo   } Scoped event\n",
+  };
+  // clang-format on
+  EXPECT_THAT(lines, ContainerEq(golden_lines));
+}
+
+TEST_P(PerfettoApiTest, TrackEventObserver) {
+  class Observer : public perfetto::TrackEventSessionObserver {
+   public:
+    ~Observer() override = default;
+
+    void OnSetup(const perfetto::DataSourceBase::SetupArgs&) {
+      // Since other tests here register multiple track event data sources,
+      // ignore all but the first notifications.
+      if (setup_called)
+        return;
+      setup_called = true;
+      if (unsubscribe_at_setup)
+        perfetto::TrackEvent::RemoveSessionObserver(this);
+      // This event isn't recorded in the trace because tracing isn't active yet
+      // when OnSetup is called.
+      TRACE_EVENT_INSTANT("foo", "OnSetup");
+      // However the active tracing categories have already been updated at this
+      // point.
+      EXPECT_TRUE(perfetto::TrackEvent::IsEnabled());
+      EXPECT_TRUE(TRACE_EVENT_CATEGORY_ENABLED("foo"));
+    }
+
+    void OnStart(const perfetto::DataSourceBase::StartArgs&) {
+      if (start_called)
+        return;
+      start_called = true;
+      EXPECT_TRUE(perfetto::TrackEvent::IsEnabled());
+      EXPECT_TRUE(TRACE_EVENT_CATEGORY_ENABLED("foo"));
+      TRACE_EVENT_INSTANT("foo", "OnStart");
+    }
+
+    void OnStop(const perfetto::DataSourceBase::StopArgs&) {
+      if (stop_called)
+        return;
+      stop_called = true;
+      EXPECT_TRUE(perfetto::TrackEvent::IsEnabled());
+      EXPECT_TRUE(TRACE_EVENT_CATEGORY_ENABLED("foo"));
+      TRACE_EVENT_INSTANT("foo", "OnStop");
+      perfetto::TrackEvent::Flush();
+    }
+
+    bool setup_called{};
+    bool start_called{};
+    bool stop_called{};
+    bool unsubscribe_at_setup{};
+  };
+
+  EXPECT_FALSE(perfetto::TrackEvent::IsEnabled());
+  {
+    Observer observer;
+    perfetto::TrackEvent::AddSessionObserver(&observer);
+
+    auto* tracing_session = NewTraceWithCategories({"foo"});
+    tracing_session->get()->StartBlocking();
+    EXPECT_TRUE(observer.setup_called);
+    EXPECT_TRUE(observer.start_called);
+    tracing_session->get()->StopBlocking();
+    EXPECT_TRUE(observer.stop_called);
+    perfetto::TrackEvent::RemoveSessionObserver(&observer);
+    auto slices = ReadSlicesFromTrace(tracing_session->get());
+    EXPECT_THAT(slices, ElementsAre("I:foo.OnStart", "I:foo.OnStop"));
+  }
+
+  // No notifications after removing observer.
+  {
+    Observer observer;
+    perfetto::TrackEvent::AddSessionObserver(&observer);
+    perfetto::TrackEvent::RemoveSessionObserver(&observer);
+    auto* tracing_session = NewTraceWithCategories({"foo"});
+    tracing_session->get()->StartBlocking();
+    EXPECT_FALSE(observer.setup_called);
+    EXPECT_FALSE(observer.start_called);
+    tracing_session->get()->StopBlocking();
+    EXPECT_FALSE(observer.stop_called);
+  }
+
+  // Removing observer in a callback.
+  {
+    Observer observer;
+    observer.unsubscribe_at_setup = true;
+    perfetto::TrackEvent::AddSessionObserver(&observer);
+    auto* tracing_session = NewTraceWithCategories({"foo"});
+    tracing_session->get()->StartBlocking();
+    EXPECT_TRUE(observer.setup_called);
+    EXPECT_FALSE(observer.start_called);
+    tracing_session->get()->StopBlocking();
+    EXPECT_FALSE(observer.stop_called);
+    perfetto::TrackEvent::RemoveSessionObserver(&observer);
+  }
+
+  // Multiple observers.
+  {
+    Observer observer1;
+    Observer observer2;
+    perfetto::TrackEvent::AddSessionObserver(&observer1);
+    perfetto::TrackEvent::AddSessionObserver(&observer2);
+    auto* tracing_session = NewTraceWithCategories({"foo"});
+    tracing_session->get()->StartBlocking();
+    tracing_session->get()->StopBlocking();
+    perfetto::TrackEvent::RemoveSessionObserver(&observer1);
+    perfetto::TrackEvent::RemoveSessionObserver(&observer2);
+    auto slices = ReadSlicesFromTrace(tracing_session->get());
+    EXPECT_THAT(slices, ElementsAre("I:foo.OnStart", "I:foo.OnStart",
+                                    "I:foo.OnStop", "I:foo.OnStop"));
+  }
+
+  // Multiple observers with one being removed midway.
+  {
+    Observer observer1;
+    Observer observer2;
+    perfetto::TrackEvent::AddSessionObserver(&observer1);
+    perfetto::TrackEvent::AddSessionObserver(&observer2);
+    auto* tracing_session = NewTraceWithCategories({"foo"});
+    tracing_session->get()->StartBlocking();
+    perfetto::TrackEvent::RemoveSessionObserver(&observer1);
+    tracing_session->get()->StopBlocking();
+    perfetto::TrackEvent::RemoveSessionObserver(&observer2);
+    auto slices = ReadSlicesFromTrace(tracing_session->get());
+    EXPECT_THAT(slices,
+                ElementsAre("I:foo.OnStart", "I:foo.OnStart", "I:foo.OnStop"));
+  }
+  EXPECT_FALSE(perfetto::TrackEvent::IsEnabled());
 }
 
 struct BackendTypeAsString {

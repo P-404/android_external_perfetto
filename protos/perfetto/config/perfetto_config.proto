@@ -339,6 +339,11 @@ message ChromeConfig {
     USER_INITIATED = 2;
   }
   optional ClientPriority client_priority = 4;
+
+  // Applicable only when using legacy JSON format.
+  // If |json_agent_label_filter| is not empty, only data pertaining to
+  // the specified tracing agent label (e.g. "traceEvents") will be returned.
+  optional string json_agent_label_filter = 5;
 }
 
 // End of protos/perfetto/config/chrome/chrome_config.proto
@@ -368,6 +373,13 @@ message FtraceConfig {
   // kptr_restrict has been manually lowered.
   // It does not disclose KASLR, symbol addresses are mangled.
   optional bool symbolize_ksyms = 13;
+
+  // By default the kernel symbolizer is lazily initialized on a deferred task
+  // to reduce ftrace's time-to-start-recording. Unfortunately that makes
+  // ksyms integration tests hard. This flag forces the kernel symbolizer to be
+  // initialized synchronously on the data source start and hence avoiding
+  // timing races in tests.
+  optional bool initialize_ksyms_synchronously_for_testing = 14;
 }
 
 // End of protos/perfetto/config/ftrace/ftrace_config.proto
@@ -434,6 +446,20 @@ message InodeFileConfig {
 
 // End of protos/perfetto/config/inode_file/inode_file_config.proto
 
+// Begin of protos/perfetto/config/interceptors/console_config.proto
+
+message ConsoleConfig {
+  enum Output {
+    OUTPUT_UNSPECIFIED = 0;
+    OUTPUT_STDOUT = 1;
+    OUTPUT_STDERR = 2;
+  }
+  optional Output output = 1;
+  optional bool enable_colors = 2;
+}
+
+// End of protos/perfetto/config/interceptors/console_config.proto
+
 // Begin of protos/perfetto/config/interceptor_config.proto
 
 // Configuration for trace packet interception. Used for diverting trace data to
@@ -442,6 +468,8 @@ message InodeFileConfig {
 message InterceptorConfig {
   // Matches the name given to RegisterInterceptor().
   optional string name = 1;
+
+  optional ConsoleConfig console_config = 100 [lazy = true];
 }
 
 // End of protos/perfetto/config/interceptor_config.proto
@@ -735,7 +763,7 @@ message JavaHprofConfig {
 // At the time of writing, the config options are restricted to the periodic
 // system-wide stack sampling use-case (|all_cpus| must be true).
 //
-// Next id: 13
+// Next id: 14
 message PerfEventConfig {
   // If true, sample events on all CPUs.
   optional bool all_cpus = 1;
@@ -788,6 +816,14 @@ message PerfEventConfig {
   // explicitly included nor excluded will be considered. Processes are accepted
   // on a first come, first served basis.
   optional uint32 additional_cmdline_count = 11;
+
+  //
+  // Daemon's resource usage limits:
+  //
+
+  // Stop the data source if traced_perf's combined {RssAnon + Swap} memory
+  // footprint exceeds this value.
+  optional uint32 max_daemon_memory_kb = 13;
 
   //
   // Uncommon options:

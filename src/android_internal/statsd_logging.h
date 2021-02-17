@@ -20,7 +20,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "src/perfetto_cmd/perfetto_atoms.h"
+#include "src/android_stats/perfetto_atoms.h"
 
 namespace perfetto {
 namespace android_internal {
@@ -31,6 +31,9 @@ void __attribute__((visibility("default")))
 StatsdLogUploadEvent(PerfettoStatsdAtom atom,
                      int64_t uuid_lsb,
                      int64_t uuid_msb);
+
+void __attribute__((visibility("default")))
+StatsdLogTriggerEvent(PerfettoTriggerAtom atom, const char* trigger_name);
 
 }  // extern "C"
 
