@@ -43,6 +43,7 @@
 #include "src/profiling/perf/common_types.h"
 #include "src/profiling/perf/event_reader.h"
 
+#include "protos/perfetto/common/builtin_clock.pbzero.h"
 #include "protos/perfetto/config/profiling/perf_event_config.pbzero.h"
 #include "protos/perfetto/trace/profiling/profile_packet.pbzero.h"
 #include "protos/perfetto/trace/trace_packet.pbzero.h"
@@ -216,10 +217,20 @@ void PerfProducer::StartDataSource(DataSourceInstanceID ds_id,
   if (config.name() != kDataSourceName)
     return;
 
+  // Tracepoint name -> id lookup in case the config asks for tracepoints:
+  auto tracepoint_id_lookup = [this](const std::string& group,
+                                     const std::string& name) {
+    if (!tracefs_)  // lazy init or retry
+      tracefs_ = FtraceProcfs::CreateGuessingMountPoint();
+    if (!tracefs_)  // still didn't find an accessible tracefs
+      return 0u;
+    return tracefs_->ReadEventId(group, name);
+  };
+
   protos::pbzero::PerfEventConfig::Decoder event_config_pb(
       config.perf_event_config_raw());
   base::Optional<EventConfig> event_config =
-      EventConfig::Create(event_config_pb, config);
+      EventConfig::Create(event_config_pb, config, tracepoint_id_lookup);
   if (!event_config.has_value()) {
     PERFETTO_ELOG("PerfEventConfig rejected.");
     return;
@@ -256,6 +267,11 @@ void PerfProducer::StartDataSource(DataSourceInstanceID ds_id,
                             std::move(per_cpu_readers)));
   PERFETTO_CHECK(inserted);
   DataSourceState& ds = ds_it->second;
+
+  // Start the configured events.
+  for (auto& per_cpu_reader : ds.per_cpu_readers) {
+    per_cpu_reader.EnableEvents();
+  }
 
   // Write out a packet to initialize the incremental state for this sequence.
   InterningOutputTracker::WriteFixedInterningsPacket(
@@ -654,6 +670,7 @@ void PerfProducer::EmitSample(DataSourceInstanceID ds_id,
   // start packet
   auto packet = ds.trace_writer->NewTracePacket();
   packet->set_timestamp(sample.timestamp);
+  packet->set_timestamp_clock_id(protos::pbzero::BUILTIN_CLOCK_MONOTONIC_RAW);
 
   // write new interning data (if any)
   protos::pbzero::InternedData* interned_out = packet->set_interned_data();
@@ -725,6 +742,7 @@ void PerfProducer::EmitSkippedSample(DataSourceInstanceID ds_id,
 
   auto packet = ds.trace_writer->NewTracePacket();
   packet->set_timestamp(sample.timestamp);
+  packet->set_timestamp_clock_id(protos::pbzero::BUILTIN_CLOCK_MONOTONIC_RAW);
   auto* perf_sample = packet->set_perf_sample();
   perf_sample->set_cpu(sample.cpu);
   perf_sample->set_pid(static_cast<uint32_t>(sample.pid));
@@ -754,7 +772,7 @@ void PerfProducer::InitiateReaderStop(DataSourceState* ds) {
 
   ds->status = DataSourceState::Status::kShuttingDown;
   for (auto& event_reader : ds->per_cpu_readers) {
-    event_reader.PauseEvents();
+    event_reader.DisableEvents();
   }
 }
 

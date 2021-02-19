@@ -27,6 +27,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "perfetto/base/template_util.h"
 #include "perfetto/protozero/scattered_heap_buffer.h"
 #include "perfetto/tracing/debug_annotation.h"
 #include "perfetto/tracing/track_event.h"
@@ -35,6 +36,102 @@
 #include "test/gtest_and_gmock.h"
 
 namespace perfetto {
+
+// static asserts checking for conversion support for known types.
+
+#define ASSERT_TYPE_SUPPORTED(T)                           \
+  static_assert(check_traced_value_support<T>::value, ""); \
+  static_assert(internal::has_traced_value_support<T>::value, "")
+
+#define ASSERT_TYPE_NOT_SUPPORTED(T) \
+  static_assert(!internal::has_traced_value_support<T>::value, "")
+
+struct NonSupportedType {};
+
+ASSERT_TYPE_SUPPORTED(bool);
+
+ASSERT_TYPE_NOT_SUPPORTED(NonSupportedType);
+
+// Integer types.
+ASSERT_TYPE_SUPPORTED(short int);
+ASSERT_TYPE_SUPPORTED(unsigned short int);
+ASSERT_TYPE_SUPPORTED(int);
+ASSERT_TYPE_SUPPORTED(unsigned int);
+ASSERT_TYPE_SUPPORTED(long int);
+ASSERT_TYPE_SUPPORTED(unsigned long int);
+ASSERT_TYPE_SUPPORTED(long long int);
+ASSERT_TYPE_SUPPORTED(unsigned long long int);
+
+// References and const references types.
+ASSERT_TYPE_SUPPORTED(int&);
+ASSERT_TYPE_SUPPORTED(const int&);
+ASSERT_TYPE_NOT_SUPPORTED(NonSupportedType&);
+ASSERT_TYPE_NOT_SUPPORTED(const NonSupportedType&);
+
+// Character types.
+ASSERT_TYPE_SUPPORTED(signed char);
+ASSERT_TYPE_SUPPORTED(unsigned char);
+ASSERT_TYPE_SUPPORTED(char);
+ASSERT_TYPE_SUPPORTED(wchar_t);
+
+// Float types.
+ASSERT_TYPE_SUPPORTED(float);
+ASSERT_TYPE_SUPPORTED(double);
+ASSERT_TYPE_SUPPORTED(long double);
+
+// Strings.
+ASSERT_TYPE_SUPPORTED(const char*);
+ASSERT_TYPE_SUPPORTED(const char[]);
+ASSERT_TYPE_SUPPORTED(const char[2]);
+ASSERT_TYPE_SUPPORTED(std::string);
+
+// Pointers.
+ASSERT_TYPE_SUPPORTED(int*);
+ASSERT_TYPE_SUPPORTED(const int*);
+ASSERT_TYPE_SUPPORTED(void*);
+ASSERT_TYPE_SUPPORTED(const void*);
+ASSERT_TYPE_SUPPORTED(nullptr_t);
+ASSERT_TYPE_NOT_SUPPORTED(NonSupportedType*);
+ASSERT_TYPE_NOT_SUPPORTED(const NonSupportedType*);
+
+// Arrays.
+ASSERT_TYPE_NOT_SUPPORTED(int[]);
+ASSERT_TYPE_NOT_SUPPORTED(const int[]);
+ASSERT_TYPE_NOT_SUPPORTED(NonSupportedType[]);
+ASSERT_TYPE_NOT_SUPPORTED(const NonSupportedType[]);
+ASSERT_TYPE_NOT_SUPPORTED(int[3]);
+ASSERT_TYPE_NOT_SUPPORTED(const int[3]);
+ASSERT_TYPE_NOT_SUPPORTED(NonSupportedType[3]);
+ASSERT_TYPE_NOT_SUPPORTED(const NonSupportedType[3]);
+
+// STL containers.
+ASSERT_TYPE_SUPPORTED(std::vector<int>);
+ASSERT_TYPE_NOT_SUPPORTED(std::vector<NonSupportedType>);
+
+using array_int_t = std::array<int, 4>;
+ASSERT_TYPE_SUPPORTED(array_int_t);
+ASSERT_TYPE_SUPPORTED(std::deque<int>);
+ASSERT_TYPE_SUPPORTED(std::forward_list<int>);
+ASSERT_TYPE_SUPPORTED(std::list<int>);
+ASSERT_TYPE_NOT_SUPPORTED(std::stack<int>);
+ASSERT_TYPE_NOT_SUPPORTED(std::queue<int>);
+ASSERT_TYPE_NOT_SUPPORTED(std::priority_queue<int>);
+ASSERT_TYPE_SUPPORTED(std::set<int>);
+ASSERT_TYPE_SUPPORTED(std::multiset<int>);
+using map_int_int_t = std::map<int, int>;
+ASSERT_TYPE_NOT_SUPPORTED(map_int_int_t);
+using multimap_int_int_t = std::multimap<int, int>;
+ASSERT_TYPE_NOT_SUPPORTED(multimap_int_int_t);
+ASSERT_TYPE_SUPPORTED(std::unordered_set<int>);
+ASSERT_TYPE_SUPPORTED(std::unordered_multiset<int>);
+using unordered_map_int_int_t = std::unordered_map<int, int>;
+ASSERT_TYPE_NOT_SUPPORTED(unordered_map_int_int_t);
+using unordered_multimap_int_int_t = std::unordered_multimap<int, int>;
+ASSERT_TYPE_NOT_SUPPORTED(unordered_multimap_int_int_t);
+
+// unique_ptr.
+ASSERT_TYPE_SUPPORTED(std::unique_ptr<int>);
+ASSERT_TYPE_NOT_SUPPORTED(std::unique_ptr<NonSupportedType>);
 
 namespace {
 
@@ -70,7 +167,11 @@ void WriteAsJSON(const protos::DebugAnnotation::NestedValue& value,
     ss << value.double_value();
     return;
   } else if (value.has_bool_value()) {
-    ss << static_cast<bool>(value.bool_value());
+    if (value.bool_value()) {
+      ss << "true";
+    } else {
+      ss << "false";
+    }
     return;
   } else if (value.has_string_value()) {
     ss << value.string_value();
@@ -80,7 +181,11 @@ void WriteAsJSON(const protos::DebugAnnotation::NestedValue& value,
 
 void WriteAsJSON(const protos::DebugAnnotation& value, std::stringstream& ss) {
   if (value.has_bool_value()) {
-    ss << static_cast<bool>(value.bool_value());
+    if (value.bool_value()) {
+      ss << "true";
+    } else {
+      ss << "false";
+    }
     return;
   } else if (value.has_uint_value()) {
     ss << value.uint_value();
@@ -95,7 +200,9 @@ void WriteAsJSON(const protos::DebugAnnotation& value, std::stringstream& ss) {
     ss << value.string_value();
     return;
   } else if (value.has_pointer_value()) {
-    ss << value.pointer_value();
+    // Printing pointer values via ostream is really platform-specific, so do
+    // not try to convert it to void* before printing.
+    ss << "0x" << std::hex << value.pointer_value() << std::dec;
     return;
   } else if (value.has_nested_value()) {
     WriteAsJSON(value.nested_value(), ss);
@@ -126,7 +233,25 @@ TEST(TracedValueTest, FlatDictionary_Explicit) {
     dict.AddItem("string").WriteString("string");
     dict.AddItem("ptr").WritePointer(reinterpret_cast<void*>(0x1234));
   }
-  EXPECT_EQ("{bool:1,double:0,int:2014,string:string,ptr:4660}",
+  // TODO(altimin): Nested pointers are recorded as ints due to proto
+  // limitation. Fix after sorting out the NestedValue.
+  EXPECT_EQ("{bool:true,double:0,int:2014,string:string,ptr:4660}",
+            MessageToJSON(message.SerializeAsString()));
+}
+
+TEST(TracedValueTest, FlatDictionary_Short) {
+  protozero::HeapBuffered<protos::pbzero::DebugAnnotation> message;
+  {
+    auto dict = TracedValue::CreateForTest(message.get()).WriteDictionary();
+    dict.Add("bool", true);
+    dict.Add("double", 0.0);
+    dict.Add("int", 2014);
+    dict.Add("string", "string");
+    dict.Add("ptr", reinterpret_cast<void*>(0x1234));
+  }
+  // TODO(altimin): Nested pointers are recorded as ints due to proto
+  // limitation. Fix after sorting out the NestedValue.
+  EXPECT_EQ("{bool:true,double:0,int:2014,string:string,ptr:4660}",
             MessageToJSON(message.SerializeAsString()));
 }
 
@@ -161,13 +286,137 @@ TEST(TracedValueTest, Hierarchy_Explicit) {
 
   EXPECT_EQ(
       "{"
-      "a1:[1,1,{i2:3}],"
-      "b0:1,"
+      "a1:[1,true,{i2:3}],"
+      "b0:true,"
       "d0:0,"
-      "dict1:{dict2:{b2:0},i1:2014,s1:foo},"
+      "dict1:{dict2:{b2:false},i1:2014,s1:foo},"
       "i0:2014,"
       "s0:foo}",
       MessageToJSON(message.SerializeAsString()));
+}
+
+TEST(TracedValueTest, Hierarchy_Short) {
+  protozero::HeapBuffered<protos::pbzero::DebugAnnotation> message;
+  {
+    auto root_dict =
+        TracedValue::CreateForTest(message.get()).WriteDictionary();
+    {
+      auto array = root_dict.AddArray("a1");
+      array.Append(1);
+      array.Append(true);
+      {
+        auto dict = array.AppendDictionary();
+        dict.Add("i2", 3);
+      }
+    }
+    root_dict.Add("b0", true);
+    root_dict.Add("d0", 0.0);
+    {
+      auto dict1 = root_dict.AddDictionary("dict1");
+      {
+        auto dict2 = dict1.AddDictionary("dict2");
+        dict2.Add("b2", false);
+      }
+      dict1.Add("i1", 2014);
+      dict1.Add("s1", "foo");
+    }
+    root_dict.Add("i0", 2014);
+    root_dict.Add("s0", "foo");
+  }
+
+  EXPECT_EQ(
+      "{"
+      "a1:[1,true,{i2:3}],"
+      "b0:true,"
+      "d0:0,"
+      "dict1:{dict2:{b2:false},i1:2014,s1:foo},"
+      "i0:2014,"
+      "s0:foo}",
+      MessageToJSON(message.SerializeAsString()));
+}
+
+namespace {
+
+class HasConvertorMember {
+ public:
+  void WriteIntoTracedValue(TracedValue context) const {
+    auto dict = std::move(context).WriteDictionary();
+    dict.Add("int", 42);
+    dict.Add("bool", false);
+  }
+};
+
+class HasExternalConvertor {};
+
+class HasAllConversionMethods {
+ public:
+  void WriteIntoTracedValue(TracedValue context) const {
+    std::move(context).WriteString("T::WriteIntoTracedValue");
+  }
+
+  void operator()(TracedValue context) const {
+    std::move(context).WriteString("T::()");
+  }
+};
+
+class NoConversions {};
+
+}  // namespace
+
+template <>
+struct TraceFormatTraits<HasExternalConvertor> {
+  static void WriteIntoTracedValue(TracedValue context,
+                                   const HasExternalConvertor&) {
+    std::move(context).WriteString("TraceFormatTraits::WriteIntoTracedValue");
+  }
+};
+
+template <>
+struct TraceFormatTraits<HasAllConversionMethods> {
+  static void WriteIntoTracedValue(TracedValue context,
+                                   const HasAllConversionMethods&) {
+    std::move(context).WriteString("TraceFormatTraits::WriteIntoTracedValue");
+  }
+};
+
+template <typename T>
+std::string ToString(T&& value) {
+  protozero::HeapBuffered<protos::pbzero::DebugAnnotation> message;
+  WriteIntoTracedValue(TracedValue::CreateForTest(message.get()),
+                       std::forward<T>(value));
+  return MessageToJSON(message.SerializeAsString());
+}
+
+template <typename T>
+std::string ToStringWithFallback(T&& value, const std::string& fallback) {
+  protozero::HeapBuffered<protos::pbzero::DebugAnnotation> message;
+  WriteIntoTracedValueWithFallback(TracedValue::CreateForTest(message.get()),
+                                   std::forward<T>(value), fallback);
+  return MessageToJSON(message.SerializeAsString());
+}
+
+ASSERT_TYPE_SUPPORTED(HasConvertorMember);
+ASSERT_TYPE_SUPPORTED(HasExternalConvertor);
+ASSERT_TYPE_SUPPORTED(HasAllConversionMethods);
+
+TEST(TracedValueTest, UserDefinedConvertors) {
+  HasConvertorMember value1;
+  EXPECT_EQ(ToString(value1), "{int:42,bool:false}");
+  EXPECT_EQ(ToString(&value1), "{int:42,bool:false}");
+
+  HasExternalConvertor value2;
+  EXPECT_EQ(ToString(value2), "TraceFormatTraits::WriteIntoTracedValue");
+  EXPECT_EQ(ToString(&value2), "TraceFormatTraits::WriteIntoTracedValue");
+
+  HasAllConversionMethods value3;
+  EXPECT_EQ(ToString(value3), "T::WriteIntoTracedValue");
+  EXPECT_EQ(ToString(&value3), "T::WriteIntoTracedValue");
+}
+
+TEST(TracedValueTest, WriteAsLambda) {
+  EXPECT_EQ("42", ToString([&](TracedValue context) {
+              std::move(context).WriteInt64(42);
+            }));
 }
 
 #if PERFETTO_DCHECK_IS_ON()
@@ -208,11 +457,71 @@ TEST(TracedValueTest, FailOnIncorrectUsage) {
             TracedValue::CreateForTest(message.get()).WriteDictionary();
         {
           auto inner_dict = outer_dict.AddDictionary("inner");
-          outer_dict.AddItem("key").WriteString("value");
+          outer_dict.Add("key", "value");
         }
       },
       "");
 }
 #endif  // PERFETTO_DCHECK_IS_ON()
+
+TEST(TracedValueTest, PrimitiveTypesSupport) {
+  EXPECT_EQ("0x0", ToString(nullptr));
+  EXPECT_EQ("0x1", ToString(reinterpret_cast<void*>(1)));
+  EXPECT_EQ("1", ToString(1));
+  EXPECT_EQ("1.5", ToString(1.5));
+  EXPECT_EQ("true", ToString(true));
+  EXPECT_EQ("foo", ToString("foo"));
+  EXPECT_EQ("bar", ToString(std::string("bar")));
+}
+
+TEST(TracedValueTest, UniquePtrSupport) {
+  std::unique_ptr<int> value1;
+  EXPECT_EQ("0x0", ToString(value1));
+
+  std::unique_ptr<int> value2(new int(4));
+  EXPECT_EQ("4", ToString(value2));
+}
+
+namespace {
+
+enum OldStyleEnum { kFoo, kBar };
+
+enum class NewStyleEnum { kValue1, kValue2 };
+
+enum class EnumWithPrettyPrint { kValue1, kValue2 };
+
+}  // namespace
+
+template <>
+struct TraceFormatTraits<EnumWithPrettyPrint> {
+  static void WriteIntoTracedValue(TracedValue context,
+                                   EnumWithPrettyPrint value) {
+    switch (value) {
+      case EnumWithPrettyPrint::kValue1:
+        std::move(context).WriteString("value1");
+        return;
+      case EnumWithPrettyPrint::kValue2:
+        std::move(context).WriteString("value2");
+        return;
+    }
+  }
+};
+
+TEST(TracedValueTest, EnumSupport) {
+  EXPECT_EQ(ToString(kFoo), "0");
+  EXPECT_EQ(ToString(NewStyleEnum::kValue2), "1");
+  EXPECT_EQ(ToString(EnumWithPrettyPrint::kValue2), "value2");
+}
+
+TEST(TracedValueTest, ContainerSupport) {
+  std::vector<std::list<int>> value1{{1, 2}, {3, 4}};
+  EXPECT_EQ("[[1,2],[3,4]]", ToString(value1));
+}
+
+TEST(TracedValueTest, WriteWithFallback) {
+  EXPECT_EQ("1", ToStringWithFallback(1, "fallback"));
+  EXPECT_EQ("true", ToStringWithFallback(true, "fallback"));
+  EXPECT_EQ("fallback", ToStringWithFallback(NonSupportedType(), "fallback"));
+}
 
 }  // namespace perfetto

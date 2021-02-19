@@ -771,8 +771,12 @@ message JavaHprofConfig {
 // At the time of writing, the config options are restricted to the periodic
 // system-wide stack sampling use-case (|all_cpus| must be true).
 //
-// Next id: 14
+// Next id: 15
 message PerfEventConfig {
+  // Event (counter) to use as a time base for the sampling.
+  // If unset, implies the CPU timer (PERF_COUNT_SW_CPU_CLOCK) as the event.
+  optional TracepointEventConfig tracepoint = 14;
+
   // If true, sample events on all CPUs.
   optional bool all_cpus = 1;
 
@@ -854,6 +858,21 @@ message PerfEventConfig {
   optional uint32 unwind_state_clear_period_ms = 10;
 }
 
+// TODO(rsavitski): figure out the state of function tracepoints in
+// perf_event_open (they're implemented, but have constraints).
+message TracepointEventConfig {
+  // Group and name for the tracepoint, acceptable forms:
+  // * "sched/sched_switch"
+  // * "sched:sched_switch"
+  optional string name = 1;
+
+  // Optional field-level filter for the tracepoint. Only events matching this
+  // filter will be counted (and therefore contribute to the sampling period).
+  // Example: "prev_pid >= 42 && next_pid == 0".
+  // For full syntax, see kernel documentation on "Event filtering":
+  // https://www.kernel.org/doc/Documentation/trace/events.txt
+  optional string filter = 2;
+}
 // End of protos/perfetto/config/profiling/perf_event_config.proto
 
 // Begin of protos/perfetto/common/sys_stats_counters.proto
@@ -1551,6 +1570,19 @@ message TraceConfig {
       // 24 hour window. If this field is unset or zero, no limit is applied and
       // activiation of this trigger *always* starts/stops the trace.
       optional uint32 max_per_24_h = 4;
+
+      // A value between 0 and 1 which encodes the probability of skipping a
+      // trigger with this name. This is useful for reducing the probability
+      // of high-frequency triggers from dominating trace finaization. If this
+      // field is unset or zero, the trigger will *never* be skipped. If this
+      // field is greater than or equal to 1, this trigger will *always* be
+      // skipped i.e. it will be as if this trigger was never included in the
+      // first place.
+      // This probability check is applied *before* any other limits. For
+      // example, if |max_per_24_h| is also set, first we will check if the
+      // probability bar is met and only then will we check the |max_per_24_h|
+      // limit.
+      optional double skip_probability = 5;
     }
     // A list of triggers which are related to this configuration. If ANY
     // trigger is seen then an action will be performed based on |trigger_mode|.

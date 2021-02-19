@@ -196,10 +196,6 @@ void HeapprofdProducer::SetTargetProcess(pid_t target_pid,
   target_process_.cmdline = target_cmdline;
 }
 
-void HeapprofdProducer::SetInheritedSocket(base::ScopedFile inherited_socket) {
-  inherited_fd_ = std::move(inherited_socket);
-}
-
 void HeapprofdProducer::SetDataSourceCallback(std::function<void()> fn) {
   data_source_callback_ = fn;
 }
@@ -306,22 +302,6 @@ void HeapprofdProducer::Restart() {
   new (this) HeapprofdProducer(mode, task_runner, exit_when_done);
 
   ConnectWithRetries(socket_name);
-}
-
-void HeapprofdProducer::ScheduleActiveDataSourceWatchdog() {
-  PERFETTO_DCHECK(mode_ == HeapprofdMode::kChild);
-
-  // Post the first check after a delay, to let the freshly forked heapprofd
-  // to receive the active data sources from traced. The checks will reschedule
-  // themselves from that point onwards.
-  auto weak_producer = weak_factory_.GetWeakPtr();
-  task_runner_->PostDelayedTask(
-      [weak_producer]() {
-        if (!weak_producer)
-          return;
-        weak_producer->ActiveDataSourceWatchdogCheck();
-      },
-      kChildModeWatchdogPeriodMs);
 }
 
 void HeapprofdProducer::ActiveDataSourceWatchdogCheck() {
@@ -458,8 +438,6 @@ void HeapprofdProducer::SetupDataSource(DataSourceInstanceID id,
   data_sources_.emplace(id, std::move(data_source));
   PERFETTO_DLOG("Set up data source.");
 
-  if (mode_ == HeapprofdMode::kChild && inherited_fd_)
-    AdoptSocket(std::move(inherited_fd_));
   if (mode_ == HeapprofdMode::kChild && data_source_callback_)
     (*data_source_callback_)();
 }
@@ -691,23 +669,26 @@ void HeapprofdProducer::DumpProcessState(DataSource* data_source,
     if (!heap_info.heap_name.empty())
       heap_name = heap_info.heap_name.c_str();
     uint64_t sampling_interval = heap_info.sampling_interval;
+    uint64_t orig_sampling_interval = heap_info.orig_sampling_interval;
 
-    auto new_heapsamples = [pid, from_startup, dump_timestamp, process_state,
-                            data_source, heap_name, sampling_interval](
-                               ProfilePacket::ProcessHeapSamples* proto) {
-      proto->set_pid(static_cast<uint64_t>(pid));
-      proto->set_timestamp(dump_timestamp);
-      proto->set_from_startup(from_startup);
-      proto->set_disconnected(process_state->disconnected);
-      proto->set_buffer_overran(process_state->buffer_overran);
-      proto->set_buffer_corrupted(process_state->buffer_corrupted);
-      proto->set_hit_guardrail(data_source->hit_guardrail);
-      if (heap_name)
-        proto->set_heap_name(heap_name);
-      proto->set_sampling_interval_bytes(sampling_interval);
-      auto* stats = proto->set_stats();
-      SetStats(stats, *process_state);
-    };
+    auto new_heapsamples =
+        [pid, from_startup, dump_timestamp, process_state, data_source,
+         heap_name, sampling_interval,
+         orig_sampling_interval](ProfilePacket::ProcessHeapSamples* proto) {
+          proto->set_pid(static_cast<uint64_t>(pid));
+          proto->set_timestamp(dump_timestamp);
+          proto->set_from_startup(from_startup);
+          proto->set_disconnected(process_state->disconnected);
+          proto->set_buffer_overran(process_state->buffer_overran);
+          proto->set_buffer_corrupted(process_state->buffer_corrupted);
+          proto->set_hit_guardrail(data_source->hit_guardrail);
+          if (heap_name)
+            proto->set_heap_name(heap_name);
+          proto->set_sampling_interval_bytes(sampling_interval);
+          proto->set_orig_sampling_interval_bytes(orig_sampling_interval);
+          auto* stats = proto->set_stats();
+          SetStats(stats, *process_state);
+        };
 
     DumpState dump_state(data_source->trace_writer.get(),
                          std::move(new_heapsamples),
@@ -932,8 +913,12 @@ void HeapprofdProducer::HandleClientConnection(
   uint64_t shmem_size = data_source->config.shmem_size_bytes();
   if (!shmem_size)
     shmem_size = kDefaultShmemSize;
-  if (shmem_size > kMaxShmemSize)
+  if (shmem_size > kMaxShmemSize) {
+    PERFETTO_LOG("Specified shared memory size of %" PRIu64
+                 " exceeds maximum size of %" PRIu64 ". Reducing.",
+                 shmem_size, kMaxShmemSize);
     shmem_size = kMaxShmemSize;
+  }
 
   auto shmem = SharedRingBuffer::Create(static_cast<size_t>(shmem_size));
   if (!shmem || !shmem->is_valid()) {
@@ -1131,6 +1116,8 @@ void HeapprofdProducer::HandleHeapNameRecord(HeapNameRecord rec) {
   }
   if (entry.sample_interval != 0) {
     ProcessState::HeapInfo& hi = process_state.GetHeapInfo(entry.heap_id);
+    if (!hi.sampling_interval)
+      hi.orig_sampling_interval = entry.sample_interval;
     hi.sampling_interval = entry.sample_interval;
   }
 }

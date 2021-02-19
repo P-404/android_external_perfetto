@@ -184,6 +184,7 @@ perfetto_cc_library(
         ":src_traced_probes_filesystem_filesystem",
         ":src_traced_probes_ftrace_format_parser_format_parser",
         ":src_traced_probes_ftrace_ftrace",
+        ":src_traced_probes_ftrace_ftrace_procfs",
         ":src_traced_probes_initial_display_state_initial_display_state",
         ":src_traced_probes_metatrace_metatrace",
         ":src_traced_probes_packages_list_packages_list",
@@ -281,6 +282,7 @@ filegroup(
         "include/perfetto/base/proc_utils.h",
         "include/perfetto/base/status.h",
         "include/perfetto/base/task_runner.h",
+        "include/perfetto/base/template_util.h",
         "include/perfetto/base/thread_utils.h",
         "include/perfetto/base/time.h",
     ],
@@ -527,6 +529,7 @@ filegroup(
         "include/perfetto/tracing/platform.h",
         "include/perfetto/tracing/trace_writer_base.h",
         "include/perfetto/tracing/traced_value.h",
+        "include/perfetto/tracing/traced_value_forward.h",
         "include/perfetto/tracing/tracing.h",
         "include/perfetto/tracing/tracing_backend.h",
         "include/perfetto/tracing/track.h",
@@ -887,7 +890,9 @@ genrule(
         "src/trace_processor/metrics/android/android_gpu.sql",
         "src/trace_processor/metrics/android/android_hwcomposer.sql",
         "src/trace_processor/metrics/android/android_hwui_metric.sql",
+        "src/trace_processor/metrics/android/android_hwui_threads.sql",
         "src/trace_processor/metrics/android/android_ion.sql",
+        "src/trace_processor/metrics/android/android_jank.sql",
         "src/trace_processor/metrics/android/android_lmk.sql",
         "src/trace_processor/metrics/android/android_lmk_reason.sql",
         "src/trace_processor/metrics/android/android_mem.sql",
@@ -940,6 +945,7 @@ genrule(
         "src/trace_processor/metrics/chrome/scroll_jank_cause_get_bitmap.sql",
         "src/trace_processor/metrics/chrome/scroll_jank_cause_queuing_delay.sql",
         "src/trace_processor/metrics/chrome/test_chrome_metric.sql",
+        "src/trace_processor/metrics/experimental/frame_times.sql",
         "src/trace_processor/metrics/trace_metadata.sql",
         "src/trace_processor/metrics/webview/webview_power_usage.sql",
     ],
@@ -974,6 +980,8 @@ filegroup(
 filegroup(
     name = "src_trace_processor_rpc_rpc",
     srcs = [
+        "src/trace_processor/rpc/proto_ring_buffer.cc",
+        "src/trace_processor/rpc/proto_ring_buffer.h",
         "src/trace_processor/rpc/query_result_serializer.cc",
         "src/trace_processor/rpc/query_result_serializer.h",
         "src/trace_processor/rpc/rpc.cc",
@@ -1361,14 +1369,21 @@ filegroup(
         "src/traced/probes/ftrace/ftrace_data_source.cc",
         "src/traced/probes/ftrace/ftrace_data_source.h",
         "src/traced/probes/ftrace/ftrace_metadata.h",
-        "src/traced/probes/ftrace/ftrace_procfs.cc",
-        "src/traced/probes/ftrace/ftrace_procfs.h",
         "src/traced/probes/ftrace/ftrace_stats.cc",
         "src/traced/probes/ftrace/ftrace_stats.h",
         "src/traced/probes/ftrace/printk_formats_parser.cc",
         "src/traced/probes/ftrace/printk_formats_parser.h",
         "src/traced/probes/ftrace/proto_translation_table.cc",
         "src/traced/probes/ftrace/proto_translation_table.h",
+    ],
+)
+
+# GN target: //src/traced/probes/ftrace:ftrace_procfs
+filegroup(
+    name = "src_traced_probes_ftrace_ftrace_procfs",
+    srcs = [
+        "src/traced/probes/ftrace/ftrace_procfs.cc",
+        "src/traced/probes/ftrace/ftrace_procfs.h",
     ],
 )
 
@@ -1465,6 +1480,8 @@ filegroup(
 filegroup(
     name = "src_traced_probes_probes_src",
     srcs = [
+        "src/traced/probes/kmem_activity_trigger.cc",
+        "src/traced/probes/kmem_activity_trigger.h",
         "src/traced/probes/probes_producer.cc",
         "src/traced/probes/probes_producer.h",
     ],
@@ -2286,6 +2303,7 @@ perfetto_proto_library(
         "protos/perfetto/metrics/android/hwcomposer.proto",
         "protos/perfetto/metrics/android/hwui_metric.proto",
         "protos/perfetto/metrics/android/ion_metric.proto",
+        "protos/perfetto/metrics/android/jank_metric.proto",
         "protos/perfetto/metrics/android/java_heap_histogram.proto",
         "protos/perfetto/metrics/android/java_heap_stats.proto",
         "protos/perfetto/metrics/android/lmk_metric.proto",
@@ -2321,6 +2339,7 @@ perfetto_proto_library(
     name = "protos_perfetto_metrics_chrome_protos",
     srcs = [
         "protos/perfetto/metrics/chrome/all_chrome_metrics.proto",
+        "protos/perfetto/metrics/chrome/frame_times.proto",
         "protos/perfetto/metrics/chrome/test_chrome_metric.proto",
     ],
     visibility = [

@@ -60,6 +60,10 @@
 #include "protos/perfetto/trace/trace_packet.pbzero.h"
 #include "protos/perfetto/trace/trigger.gen.h"
 
+#include "protos/perfetto/common/sys_stats_counters.gen.h"
+#include "protos/perfetto/config/sys_stats/sys_stats_config.gen.h"
+#include "protos/perfetto/trace/sys_stats/sys_stats.gen.h"
+
 #if PERFETTO_BUILDFLAG(PERFETTO_ANDROID_BUILD)
 #include "test/android_test_utils.h"
 #endif
@@ -118,7 +122,6 @@ class Exec {
     return subprocess_.returncode();
   }
 
- private:
   Exec(const std::string& argv0,
        std::initializer_list<std::string> args,
        std::string input = "") {
@@ -134,15 +137,19 @@ class Exec {
 
     std::vector<std::string>& cmd = subprocess_.args.exec_cmd;
     if (kUseSystemBinaries) {
+      PERFETTO_CHECK(TestHelper::kDefaultMode ==
+                     TestHelper::Mode::kUseSystemService);
       cmd.push_back("/system/bin/" + argv0);
       cmd.insert(cmd.end(), args.begin(), args.end());
     } else {
+      PERFETTO_CHECK(TestHelper::kDefaultMode ==
+                     TestHelper::Mode::kStartDaemons);
       subprocess_.args.env.push_back(
           std::string("PERFETTO_PRODUCER_SOCK_NAME=") +
-          TestHelper::GetProducerSocketName());
+          TestHelper::GetDefaultModeProducerSocketName());
       subprocess_.args.env.push_back(
           std::string("PERFETTO_CONSUMER_SOCK_NAME=") +
-          TestHelper::GetConsumerSocketName());
+          TestHelper::GetDefaultModeConsumerSocketName());
       cmd.push_back(base::GetCurExecutableDir() + "/" + argv0);
       cmd.insert(cmd.end(), args.begin(), args.end());
     }
@@ -180,7 +187,7 @@ class Exec {
     sync_pipe_.rd.reset();
   }
 
-  friend class PerfettoCmdlineTest;
+ private:
   base::Subprocess subprocess_;
   base::Pipe sync_pipe_;
 };
@@ -188,12 +195,7 @@ class Exec {
 class PerfettoTest : public ::testing::Test {
  public:
   void SetUp() override {
-    // TODO(primiano): refactor this, it's copy/pasted in three places now.
-    size_t index = 0;
-    constexpr auto kTracingPaths = FtraceController::kTracingPaths;
-    while (!ftrace_procfs_ && kTracingPaths[index]) {
-      ftrace_procfs_ = FtraceProcfs::Create(kTracingPaths[index++]);
-    }
+    ftrace_procfs_ = FtraceProcfs::CreateGuessingMountPoint();
   }
 
   std::unique_ptr<FtraceProcfs> ftrace_procfs_;
@@ -252,6 +254,33 @@ class PerfettoCmdlineTest : public ::testing::Test {
   bool exec_allowed_;
   TestHelper test_helper_{&task_runner_};
 };
+
+// For the SaveForBugreport* tests.
+void SetTraceConfigForBugreportTest(TraceConfig* trace_config) {
+  trace_config->add_buffers()->set_size_kb(4096);
+  trace_config->set_duration_ms(60000);  // Will never hit this.
+  trace_config->set_bugreport_score(10);
+  auto* ds_config = trace_config->add_data_sources()->mutable_config();
+  ds_config->set_name("android.perfetto.FakeProducer");
+  ds_config->mutable_for_testing()->set_message_count(3);
+  ds_config->mutable_for_testing()->set_message_size(10);
+  ds_config->mutable_for_testing()->set_send_batch_on_register(true);
+}
+
+// For the SaveForBugreport* tests.
+static void VerifyBugreportTraceContents() {
+  // Read the trace written in the fixed location (/data/misc/perfetto-traces/
+  // on Android, /tmp/ on Linux/Mac) and make sure it has the right contents.
+  std::string trace_str;
+  base::ReadFile(kBugreportTracePath, &trace_str);
+  ASSERT_FALSE(trace_str.empty());
+  protos::gen::Trace trace;
+  ASSERT_TRUE(trace.ParseFromString(trace_str));
+  int test_packets = 0;
+  for (const auto& p : trace.packet())
+    test_packets += p.has_for_testing() ? 1 : 0;
+  ASSERT_EQ(test_packets, 3);
+}
 
 }  // namespace
 
@@ -373,6 +402,139 @@ TEST_F(PerfettoTest, TreeHuggerOnly(TestFtraceFlush)) {
     }
   }
   ASSERT_EQ(marker_found, 1);
+}
+
+TEST_F(PerfettoTest, TreeHuggerOnly(TestKmemActivity)) {
+  using C = protos::gen::VmstatCounters;
+
+  base::TestTaskRunner task_runner;
+
+  TestHelper helper(&task_runner);
+
+  // Create kmem_activity trigger proc before starting service
+  auto kmem_activity_trigger_proc = Exec("trigger_perfetto", {"kmem_activity"});
+
+  helper.StartServiceIfRequired();
+
+#if PERFETTO_BUILDFLAG(PERFETTO_START_DAEMONS)
+  ProbesProducerThread probes(TEST_PRODUCER_SOCK_NAME);
+  probes.Connect();
+#endif
+
+  helper.ConnectConsumer();
+  helper.WaitForConsumerConnect();
+
+  TraceConfig trace_config;
+  trace_config.add_buffers()->set_size_kb(1024);
+  trace_config.set_unique_session_name("kmem_activity_test");
+
+  auto* ftrace_ds_config = trace_config.add_data_sources()->mutable_config();
+  ftrace_ds_config->set_name("linux.ftrace");
+  protos::gen::FtraceConfig ftrace_config = CreateFtraceConfig({
+      "vmscan/mm_vmscan_kswapd_wake",
+      "vmscan/mm_vmscan_kswapd_sleep",
+      "vmscan/mm_vmscan_direct_reclaim_begin",
+      "vmscan/mm_vmscan_direct_reclaim_end",
+      "compaction/mm_compaction_begin",
+      "compaction/mm_compaction_end",
+  });
+  ftrace_ds_config->set_ftrace_config_raw(ftrace_config.SerializeAsString());
+
+  auto* sys_stats_ds_config = trace_config.add_data_sources()->mutable_config();
+  sys_stats_ds_config->set_name("linux.sys_stats");
+  protos::gen::SysStatsConfig sys_stats_config;
+  sys_stats_config.set_vmstat_period_ms(50);
+  std::vector<C> vmstat_counters = {
+      C::VMSTAT_NR_FREE_PAGES,
+      C::VMSTAT_NR_SLAB_RECLAIMABLE,
+      C::VMSTAT_NR_SLAB_UNRECLAIMABLE,
+      C::VMSTAT_NR_ACTIVE_FILE,
+      C::VMSTAT_NR_INACTIVE_FILE,
+      C::VMSTAT_NR_ACTIVE_ANON,
+      C::VMSTAT_NR_INACTIVE_ANON,
+      C::VMSTAT_WORKINGSET_REFAULT,
+      C::VMSTAT_WORKINGSET_ACTIVATE,
+      C::VMSTAT_NR_FILE_PAGES,
+      C::VMSTAT_PGPGIN,
+      C::VMSTAT_PGPGOUT,
+      C::VMSTAT_PSWPIN,
+      C::VMSTAT_PSWPOUT,
+      C::VMSTAT_PGSTEAL_KSWAPD_DMA,
+      C::VMSTAT_PGSTEAL_KSWAPD_NORMAL,
+      C::VMSTAT_PGSTEAL_KSWAPD_MOVABLE,
+      C::VMSTAT_PGSTEAL_DIRECT_DMA,
+      C::VMSTAT_PGSTEAL_DIRECT_NORMAL,
+      C::VMSTAT_PGSTEAL_DIRECT_MOVABLE,
+      C::VMSTAT_PGSCAN_KSWAPD_DMA,
+      C::VMSTAT_PGSCAN_KSWAPD_NORMAL,
+      C::VMSTAT_PGSCAN_KSWAPD_MOVABLE,
+      C::VMSTAT_PGSCAN_DIRECT_DMA,
+      C::VMSTAT_PGSCAN_DIRECT_NORMAL,
+      C::VMSTAT_PGSCAN_DIRECT_MOVABLE,
+      C::VMSTAT_COMPACT_MIGRATE_SCANNED,
+      C::VMSTAT_COMPACT_FREE_SCANNED,
+  };
+  for (const auto& counter : vmstat_counters) {
+    sys_stats_config.add_vmstat_counters(counter);
+  }
+  sys_stats_ds_config->set_sys_stats_config_raw(
+      sys_stats_config.SerializeAsString());
+
+  auto* trigger_cfg = trace_config.mutable_trigger_config();
+  trigger_cfg->set_trigger_mode(
+      protos::gen::TraceConfig::TriggerConfig::START_TRACING);
+  trigger_cfg->set_trigger_timeout_ms(100);
+  auto* trigger = trigger_cfg->add_triggers();
+  trigger->set_name("kmem_activity");
+  trigger->set_stop_delay_ms(500);
+
+  helper.StartTracing(trace_config);
+
+  // Generating synthetic memory pressure to trigger kmem activity is
+  // inherently flaky on different devices. The same goes for writing
+  // /proc/sys/vm/compact_memory to trigger compaction, since compaction is
+  // only started if needed (even if explicitly triggered from proc).
+  // Trigger kmem activity using perfetto trigger.
+  std::string stderr_str;
+  EXPECT_EQ(0, kmem_activity_trigger_proc.Run(&stderr_str)) << stderr_str;
+
+  helper.WaitForTracingDisabled();
+
+  helper.ReadData();
+  helper.WaitForReadData();
+
+  const auto& packets = helper.trace();
+  ASSERT_GT(packets.size(), 0u);
+
+  bool sys_stats_captured = false;
+  for (const auto& packet : packets) {
+    for (int ev = 0; ev < packet.ftrace_events().event_size(); ev++) {
+      auto ftrace_event =
+          packet.ftrace_events().event()[static_cast<size_t>(ev)];
+      ASSERT_TRUE(ftrace_event.has_mm_vmscan_kswapd_wake() ||
+                  ftrace_event.has_mm_vmscan_kswapd_sleep() ||
+                  ftrace_event.has_mm_vmscan_direct_reclaim_begin() ||
+                  ftrace_event.has_mm_vmscan_direct_reclaim_end() ||
+                  ftrace_event.has_mm_compaction_begin() ||
+                  ftrace_event.has_mm_compaction_end());
+    }
+
+    if (packet.has_sys_stats()) {
+      sys_stats_captured = true;
+      const auto& sys_stats = packet.sys_stats();
+      const auto& vmstat = sys_stats.vmstat();
+      ASSERT_GT(vmstat.size(), 0u);
+      for (const auto& vmstat_value : vmstat) {
+        ASSERT_NE(std::find(vmstat_counters.begin(), vmstat_counters.end(),
+                            vmstat_value.key()),
+                  vmstat_counters.end());
+      }
+    }
+  }
+
+  // Don't explicitly check that ftrace events were captured, since this test
+  // doesn't rely on memory pressure.
+  ASSERT_TRUE(sys_stats_captured);
 }
 
 // Disable this test:
@@ -852,14 +1014,7 @@ TEST_F(PerfettoTest, SaveForBugreport) {
   helper.WaitForConsumerConnect();
 
   TraceConfig trace_config;
-  trace_config.add_buffers()->set_size_kb(4096);
-  trace_config.set_duration_ms(10000);
-  trace_config.set_bugreport_score(10);
-  auto* ds_config = trace_config.add_data_sources()->mutable_config();
-  ds_config->set_name("android.perfetto.FakeProducer");
-  ds_config->mutable_for_testing()->set_message_count(3);
-  ds_config->mutable_for_testing()->set_message_size(10);
-  ds_config->mutable_for_testing()->set_send_batch_on_register(true);
+  SetTraceConfigForBugreportTest(&trace_config);
 
   helper.StartTracing(trace_config);
   helper.WaitForProducerEnabled();
@@ -867,17 +1022,7 @@ TEST_F(PerfettoTest, SaveForBugreport) {
   EXPECT_TRUE(helper.SaveTraceForBugreportAndWait());
   helper.WaitForTracingDisabled();
 
-  // Read the trace written in the fixed location (/data/misc/perfetto-traces/
-  // on Android, /tmp/ on Linux/Mac) and make sure it has the right contents.
-  std::string trace_str;
-  base::ReadFile(kBugreportTracePath, &trace_str);
-  ASSERT_FALSE(trace_str.empty());
-  protos::gen::Trace trace;
-  ASSERT_TRUE(trace.ParseFromString(trace_str));
-  int test_packets = 0;
-  for (const auto& p : trace.packet())
-    test_packets += p.has_for_testing() ? 1 : 0;
-  ASSERT_EQ(test_packets, 3);
+  VerifyBugreportTraceContents();
 
   // Now read the trace returned to the consumer via ReadBuffers. This should
   // be always empty because --save-for-bugreport takes it over and makes the
@@ -889,6 +1034,43 @@ TEST_F(PerfettoTest, SaveForBugreport) {
   const auto& packets = helper.full_trace();
   ASSERT_EQ(packets.size(), 1u);
   for (const auto& p : packets) {
+    ASSERT_TRUE(p.has_service_event());
+    ASSERT_TRUE(p.service_event().seized_for_bugreport());
+  }
+}
+
+// Tests that the SaveForBugreport logic works also for traces with
+// write_into_file = true (with a passed file descriptor).
+TEST_F(PerfettoTest, SaveForBugreport_WriteIntoFile) {
+  base::TestTaskRunner task_runner;
+
+  TestHelper helper(&task_runner);
+  helper.StartServiceIfRequired();
+  helper.ConnectFakeProducer();
+  helper.ConnectConsumer();
+  helper.WaitForConsumerConnect();
+
+  TraceConfig trace_config;
+  SetTraceConfigForBugreportTest(&trace_config);
+  trace_config.set_file_write_period_ms(60000);  // Will never hit this.
+  trace_config.set_write_into_file(true);
+
+  auto pipe_pair = base::Pipe::Create();
+  helper.StartTracing(trace_config, std::move(pipe_pair.wr));
+  helper.WaitForProducerEnabled();
+
+  EXPECT_TRUE(helper.SaveTraceForBugreportAndWait());
+  helper.WaitForTracingDisabled();
+
+  VerifyBugreportTraceContents();
+
+  // Now read the original file descriptor passed in.
+  std::string trace_bytes;
+  ASSERT_TRUE(base::ReadPlatformHandle(*pipe_pair.rd, &trace_bytes));
+  protos::gen::Trace trace;
+  ASSERT_TRUE(trace.ParseFromString(trace_bytes));
+  ASSERT_EQ(trace.packet().size(), 1u);
+  for (const auto& p : trace.packet()) {
     ASSERT_TRUE(p.has_service_event());
     ASSERT_TRUE(p.service_event().seized_for_bugreport());
   }
