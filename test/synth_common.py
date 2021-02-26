@@ -15,32 +15,12 @@
 
 import argparse
 
-from google.protobuf import descriptor, descriptor_pb2, message_factory, reflection
-from google.protobuf.pyext import _message
+from collections import namedtuple
+from google.protobuf import descriptor, descriptor_pb2, message_factory, descriptor_pool
 
 CLONE_THREAD = 0x00010000
 CLONE_VFORK = 0x00004000
 CLONE_VM = 0x00000100
-
-# TODO(b/174825244): These magic numbers should go away.
-TYPE_SLICE_BEGIN = 1
-TYPE_SLICE_END = 2
-
-RAIL_MODE_RESPONSE = 1
-RAIL_MODE_ANIMATION = 2
-RAIL_MODE_IDLE = 3
-RAIL_MODE_LOAD = 4
-
-PROCESS_BROWSER = 1
-PROCESS_RENDERER = 2
-PROCESS_GPU = 6
-
-CHROME_THREAD_UNSPECIFIED = 0
-CHROME_THREAD_MAIN = 1
-CHROME_THREAD_IO = 2
-CHROME_THREAD_COMPOSITOR = 8
-
-COUNTER_THREAD_TIME_NS = 1
 
 
 def ms_to_ns(time_in_ms):
@@ -53,8 +33,9 @@ def s_to_ns(time_in_s):
 
 class Trace(object):
 
-  def __init__(self, trace):
+  def __init__(self, trace, prototypes):
     self.trace = trace
+    self.prototypes = prototypes
     self.proc_map = {}
     self.proc_map[0] = 'idle_thread'
 
@@ -476,8 +457,13 @@ class Trace(object):
       self,
       process_track,
       pid=None,
-      process_type=PROCESS_RENDERER,
+      process_type=None,
       host_app_package_name="org.chromium.chrome"):
+    if process_type is None:
+      process_type = self.prototypes.ChromeProcessDescriptor \
+        .ProcessType \
+        .PROCESS_RENDERER
+
     packet = self.add_process_track_descriptor(process_track, pid=pid)
     chrome_process = packet.track_descriptor.chrome_process
     chrome_process.process_type = process_type
@@ -502,13 +488,19 @@ class Trace(object):
                                          trusted_packet_sequence_id=None,
                                          pid=None,
                                          tid=None,
-                                         thread_type=CHROME_THREAD_UNSPECIFIED):
+                                         thread_type=None):
+    if thread_type is None:
+      thread_type = self.prototypes.ThreadDescriptor \
+        .ChromeThreadType \
+        .CHROME_THREAD_TYPE_UNSPECIFIED
+
     packet = self.add_thread_track_descriptor(
         process_track,
         thread_track,
         trusted_packet_sequence_id=trusted_packet_sequence_id,
         pid=pid,
         tid=tid)
+    packet.track_descriptor.thread.chrome_thread_type = thread_type
     return packet
 
   def add_trace_packet_defaults(self,
@@ -528,7 +520,9 @@ class Trace(object):
                                    counter_track=None):
     packet = self.add_track_descriptor(counter_track, parent=thread_track)
     packet.trusted_packet_sequence_id = trusted_packet_sequence_id
-    packet.track_descriptor.counter.type = COUNTER_THREAD_TIME_NS
+    packet.track_descriptor.counter.type = self.prototypes.CounterDescriptor \
+      .BuiltinCounterType \
+      .COUNTER_THREAD_TIME_NS
     return packet
 
   def add_chrome_thread_with_cpu_counter(self,
@@ -568,7 +562,7 @@ class Trace(object):
         track=track,
         trusted_sequence_id=trusted_sequence_id,
         cpu_time=cpu_time)
-    packet.track_event.type = TYPE_SLICE_BEGIN
+    packet.track_event.type = self.prototypes.TrackEvent.Type.TYPE_SLICE_BEGIN
     return packet
 
   def add_track_event_slice_end(self,
@@ -581,7 +575,7 @@ class Trace(object):
         track=track,
         trusted_sequence_id=trusted_sequence_id,
         cpu_time=cpu_time)
-    packet.track_event.type = TYPE_SLICE_END
+    packet.track_event.type = self.prototypes.TrackEvent.Type.TYPE_SLICE_END
     return packet
 
   # Returns the start slice packet.
@@ -624,6 +618,80 @@ class Trace(object):
 
     return metadata
 
+  def add_expected_display_frame_start_event(self, ts, cookie, token, pid):
+    packet = self.add_packet()
+    packet.timestamp = ts
+    event = packet.frame_timeline_event.expected_display_frame_start
+    if token != -1:
+      event.cookie = cookie
+      event.token = token
+      event.pid = pid
+
+  def add_actual_display_frame_start_event(self, ts, cookie, token, pid, present_type, on_time_finish, gpu_composition, jank_type):
+    packet = self.add_packet()
+    packet.timestamp = ts
+    event = packet.frame_timeline_event.actual_display_frame_start
+    if token != -1:
+      event.cookie = cookie
+      event.token = token
+      event.pid = pid
+      event.present_type = present_type
+      event.on_time_finish = on_time_finish
+      event.gpu_composition = gpu_composition
+      event.jank_type = jank_type
+
+  def add_expected_surface_frame_start_event(self, ts, cookie, token, display_frame_token, pid, layer_name):
+    packet = self.add_packet()
+    packet.timestamp = ts
+    event = packet.frame_timeline_event.expected_surface_frame_start
+    if token != -1 and display_frame_token != -1:
+      event.cookie = cookie
+      event.token = token
+      event.display_frame_token = display_frame_token
+      event.pid = pid
+      event.layer_name = layer_name
+
+  def add_actual_surface_frame_start_event(self, ts, cookie, token, display_frame_token, pid, layer_name, present_type, on_time_finish, gpu_composition, jank_type):
+    packet = self.add_packet()
+    packet.timestamp = ts
+    event = packet.frame_timeline_event.actual_surface_frame_start
+    if token != -1 and display_frame_token != -1:
+      event.cookie = cookie
+      event.token = token
+      event.display_frame_token = display_frame_token
+      event.pid = pid
+      event.layer_name = layer_name
+      event.present_type = present_type
+      event.on_time_finish = on_time_finish
+      event.gpu_composition = gpu_composition
+      event.jank_type = jank_type
+
+  def add_frame_end_event(self, ts, cookie):
+    packet = self.add_packet()
+    packet.timestamp = ts
+    event = packet.frame_timeline_event.frame_end
+    event.cookie = cookie
+
+
+def read_descriptor(file_name):
+  with open(file_name, 'rb') as f:
+    contents = f.read()
+
+  descriptor = descriptor_pb2.FileDescriptorSet()
+  descriptor.MergeFromString(contents)
+
+  return descriptor
+
+
+def create_pool(args):
+  trace_descriptor = read_descriptor(args.trace_descriptor)
+
+  pool = descriptor_pool.DescriptorPool()
+  for file in trace_descriptor.file:
+    pool.Add(file)
+
+  return pool
+
 
 def create_trace():
   parser = argparse.ArgumentParser()
@@ -631,23 +699,38 @@ def create_trace():
       'trace_descriptor', type=str, help='location of trace descriptor')
   args = parser.parse_args()
 
-  with open(args.trace_descriptor, 'rb') as t:
-    fileContent = t.read()
+  pool = create_pool(args)
+  factory = message_factory.MessageFactory(pool)
+  ProtoTrace = factory.GetPrototype(
+      pool.FindMessageTypeByName('perfetto.protos.Trace'))
 
-  file_desc_set_pb2 = descriptor_pb2.FileDescriptorSet()
-  file_desc_set_pb2.MergeFromString(fileContent)
+  class EnumPrototype(object):
 
-  desc_by_path = {}
-  for f_desc_pb2 in file_desc_set_pb2.file:
-    f_desc_pb2_encode = f_desc_pb2.SerializeToString()
-    f_desc = descriptor.FileDescriptor(
-        name=f_desc_pb2.name,
-        package=f_desc_pb2.package,
-        serialized_pb=f_desc_pb2_encode)
+    def from_descriptor(desc):
+      res = EnumPrototype()
+      for desc in desc.values:
+        print(desc.name)
+        setattr(res, desc.name, desc.number)
+      return res
 
-    for desc in f_desc.message_types_by_name.values():
-      desc_by_path[desc.full_name] = desc
-
-  trace = message_factory.MessageFactory().GetPrototype(
-      desc_by_path['perfetto.protos.Trace'])()
-  return Trace(trace)
+  Prototypes = namedtuple('Prototypes', [
+      'TrackEvent',
+      'ChromeRAILMode',
+      'ThreadDescriptor',
+      'ChromeProcessDescriptor',
+      'CounterDescriptor',
+  ])
+  prototypes = Prototypes(
+      TrackEvent=factory.GetPrototype(
+          pool.FindMessageTypeByName('perfetto.protos.TrackEvent')),
+      ChromeRAILMode=EnumPrototype.from_descriptor(
+          pool.FindEnumTypeByName('perfetto.protos.ChromeRAILMode')),
+      ThreadDescriptor=factory.GetPrototype(
+          pool.FindMessageTypeByName('perfetto.protos.ThreadDescriptor')),
+      ChromeProcessDescriptor=factory.GetPrototype(
+          pool.FindMessageTypeByName(
+              'perfetto.protos.ChromeProcessDescriptor')),
+      CounterDescriptor=factory.GetPrototype(
+          pool.FindMessageTypeByName('perfetto.protos.CounterDescriptor')),
+  )
+  return Trace(ProtoTrace(), prototypes)
