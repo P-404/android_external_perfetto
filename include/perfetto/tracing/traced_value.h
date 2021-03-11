@@ -31,10 +31,6 @@ namespace perfetto {
 
 class DebugAnnotation;
 
-// *** NOTE ***
-// This is work-in-progress and the examples below do not work yet.
-//
-//
 // These classes provide a JSON-inspired way to write structed data into traces.
 //
 // Each TracedValue can be consumed exactly once to write a value into a trace
@@ -112,6 +108,12 @@ class DebugAnnotation;
 // }
 class TracedArray;
 class TracedDictionary;
+class TracedValue;
+
+namespace internal {
+PERFETTO_EXPORT TracedValue
+CreateTracedValueFromProto(protos::pbzero::DebugAnnotation*);
+}
 
 class PERFETTO_EXPORT TracedValue {
  public:
@@ -120,6 +122,11 @@ class PERFETTO_EXPORT TracedValue {
   TracedValue& operator=(TracedValue&&) = delete;
   TracedValue(TracedValue&&) = default;
   ~TracedValue() = default;
+
+  // TracedValue represents a context into which a single value can be written
+  // (either by writing it directly for primitive types, or by creating a
+  // TracedArray or TracedDictionary for the complex types). This is enforced
+  // by allowing Write* methods to be called only on rvalue references.
 
   void WriteInt64(int64_t value) &&;
   void WriteUInt64(uint64_t value) &&;
@@ -148,11 +155,13 @@ class PERFETTO_EXPORT TracedValue {
   // Scope which allows multiple key-value pairs to be added.
   TracedDictionary WriteDictionary() && PERFETTO_WARN_UNUSED_RESULT;
 
-  static TracedValue CreateForTest(protos::pbzero::DebugAnnotation*);
-
  private:
   friend class TracedArray;
   friend class TracedDictionary;
+  friend TracedValue internal::CreateTracedValueFromProto(
+      protos::pbzero::DebugAnnotation*);
+
+  static TracedValue CreateFromProto(protos::pbzero::DebugAnnotation*);
 
   inline explicit TracedValue(protos::pbzero::DebugAnnotation* root_context,
                               internal::CheckedScope* parent_scope)
@@ -176,7 +185,7 @@ class PERFETTO_EXPORT TracedValue {
   internal::CheckedScope checked_scope_;
 };
 
-class TracedArray {
+class PERFETTO_EXPORT TracedArray {
  public:
   TracedArray(const TracedArray&) = delete;
   TracedArray& operator=(const TracedArray&) = delete;
@@ -187,8 +196,8 @@ class TracedArray {
   TracedValue AppendItem();
 
   template <typename T>
-  void Append(const T& value) {
-    WriteIntoTracedValue(AppendItem(), value);
+  void Append(T&& value) {
+    WriteIntoTracedValue(AppendItem(), std::forward<T>(value));
   }
 
   TracedDictionary AppendDictionary() PERFETTO_WARN_UNUSED_RESULT;
@@ -207,7 +216,7 @@ class TracedArray {
   internal::CheckedScope checked_scope_;
 };
 
-class TracedDictionary {
+class PERFETTO_EXPORT TracedDictionary {
  public:
   TracedDictionary(const TracedDictionary&) = delete;
   TracedDictionary& operator=(const TracedDictionary&) = delete;
@@ -218,8 +227,8 @@ class TracedDictionary {
   TracedValue AddItem(const char* key);
 
   template <typename T>
-  void Add(const char* key, const T& value) {
-    WriteIntoTracedValue(AddItem(key), value);
+  void Add(const char* key, T&& value) {
+    WriteIntoTracedValue(AddItem(key), std::forward<T>(value));
   }
 
   TracedDictionary AddDictionary(const char* key);
@@ -274,12 +283,16 @@ WriteImpl(base::priority_tag<2>, TracedValue context, T&& value) {
 }
 
 // If T is a container and its elements have tracing support, use it.
+//
+// Note: a reference to T should be passed to std::begin, otherwise
+// for non-reference types const T& will be passed to std::begin, losing
+// support for non-const WriteIntoTracedValue methods.
 template <typename T>
-typename std::enable_if<check_traced_value_support<base::remove_cvref_t<
-    decltype(*std::begin(std::declval<T>()))>>::value>::type
-WriteImpl(base::priority_tag<1>, TracedValue context, const T& value) {
+typename check_traced_value_support<
+    decltype(*std::begin(std::declval<T&>()))>::type
+WriteImpl(base::priority_tag<1>, TracedValue context, T&& value) {
   auto array = std::move(context).WriteArray();
-  for (const auto& item : value) {
+  for (auto&& item : value) {
     array.Append(item);
   }
 }
@@ -355,12 +368,12 @@ class has_traced_value_support {
   using No = char[2];
 
   template <typename V>
-  static Yes& check(check_traced_value_support_t<V, int>);
+  static Yes& check_support(check_traced_value_support_t<V, int>);
   template <typename V>
-  static No& check(...);
+  static No& check_support(...);
 
  public:
-  static constexpr bool value = sizeof(Yes) == sizeof(check<T>(0));
+  static constexpr bool value = sizeof(Yes) == sizeof(check_support<T>(0));
 };
 
 }  // namespace internal
@@ -528,7 +541,7 @@ struct TraceFormatTraits<const void*> {
 // Specialisation for std::unique_ptr<>, which writes either nullptr or the
 // object it points to.
 template <typename T>
-struct TraceFormatTraits<std::unique_ptr<T>, check_traced_value_support_t<T*>> {
+struct TraceFormatTraits<std::unique_ptr<T>, check_traced_value_support_t<T>> {
   inline static void WriteIntoTracedValue(TracedValue context,
                                           const std::unique_ptr<T>& value) {
     ::perfetto::WriteIntoTracedValue(std::move(context), value.get());
@@ -538,10 +551,8 @@ struct TraceFormatTraits<std::unique_ptr<T>, check_traced_value_support_t<T*>> {
 // Specialisation for raw pointer, which writes either nullptr or the object it
 // points to.
 template <typename T>
-struct TraceFormatTraits<
-    T*,
-    check_traced_value_support_t<base::remove_cvref_t<T>>> {
-  inline static void WriteIntoTracedValue(TracedValue context, const T* value) {
+struct TraceFormatTraits<T*, check_traced_value_support_t<T>> {
+  inline static void WriteIntoTracedValue(TracedValue context, T* value) {
     if (!value) {
       std::move(context).WritePointer(nullptr);
       return;
