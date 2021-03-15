@@ -58,8 +58,9 @@ trace.add_thread(
     tid=1666, tgid=PID, cmdline="GPU completion", name="GPU completion")
 
 trace.add_ftrace_packet(cpu=0)
-trace.add_atrace_async_begin(ts=0, tid=PID, pid=PID, buf="Cuj<5>")
-trace.add_atrace_async_end(ts=1_000_000_000, tid=PID, pid=PID, buf="Cuj<5>")
+trace.add_atrace_async_begin(ts=0, tid=PID, pid=PID, buf="J<SHADE_ROW_EXPAND>")
+trace.add_atrace_async_end(
+    ts=1_000_000_000, tid=PID, pid=PID, buf="J<SHADE_ROW_EXPAND>")
 
 add_frame(
     trace,
@@ -193,5 +194,15 @@ add_frame(
 
 add_render_thread_atrace(
     trace, ts=305_000_000, ts_end=308_000_000, buf="dispatchFrameCallbacks")
+
+# One more frame after the CUJ is finished
+add_frame(
+    trace,
+    ts_do_frame=1_100_000_000,
+    ts_end_do_frame=1_200_000_000,
+    ts_draw_frame=1_150_000_000,
+    ts_end_draw_frame=1_300_000_000,
+    ts_gpu=1_400_000_000,
+    ts_end_gpu=1_500_000_000)
 
 sys.stdout.buffer.write(trace.trace.SerializeToString())
