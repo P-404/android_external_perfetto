@@ -137,6 +137,60 @@ message AndroidDisplayMetrics {
 
 // End of protos/perfetto/metrics/android/display_metrics.proto
 
+// Begin of protos/perfetto/metrics/android/fastrpc_metric.proto
+
+// fastrpc memory stats on Android.
+message AndroidFastrpcMetric {
+  message Subsystem {
+    optional string name = 1;
+    optional double avg_size_bytes = 2;
+    optional double min_size_bytes = 3;
+    optional double max_size_bytes = 4;
+
+    // Total allocation size.
+    // Essentially the sum of positive allocs.
+    optional double total_alloc_size_bytes = 5;
+  }
+
+  repeated Subsystem subsystem = 1;
+}
+
+// End of protos/perfetto/metrics/android/fastrpc_metric.proto
+
+// Begin of protos/perfetto/metrics/android/g2d_metric.proto
+
+message G2dMetrics {
+  message G2dInstance {
+    // G2d name.
+    optional string name = 1;
+
+    optional int64 max_dur_ns = 2;
+    optional int64 min_dur_ns = 3;
+    optional int64 avg_dur_ns = 4;
+    optional uint32 frame_count = 5;
+    optional uint32 error_count = 6;
+  }
+  message G2dMetric {
+    // G2D Metric for each G2D Instance.
+    repeated G2dInstance instances = 1;
+
+    // max/min/avg G2d frame durations for all instances.
+    optional int64 max_dur_ns = 2;
+    optional int64 min_dur_ns = 3;
+    optional int64 avg_dur_ns = 4;
+
+    // the number of frames processed by G2D
+    optional uint32 frame_count = 5;
+    // the number of error events
+    optional uint32 error_count = 6;
+  }
+
+  optional G2dMetric g2d_hw = 1;
+  optional G2dMetric g2d_sw = 2;
+}
+
+// End of protos/perfetto/metrics/android/g2d_metric.proto
+
 // Begin of protos/perfetto/metrics/android/gpu_metric.proto
 
 message AndroidGpuMetric {
@@ -640,7 +694,7 @@ message AndroidStartupMetric {
 
   // Timing information spanning the intent received by the
   // activity manager to the first frame drawn.
-  // Next id: 22.
+  // Next id: 24.
   message ToFirstFrame {
     optional int64 dur_ns = 1;
     optional double dur_ms = 17;
@@ -661,6 +715,8 @@ message AndroidStartupMetric {
     optional Slice time_activity_resume = 8;
     optional Slice time_activity_restart = 21;
     optional Slice time_choreographer = 9;
+    optional Slice time_inflate = 22;
+    optional Slice time_get_resources = 23;
 
     // If we are starting a new process, record the duration from the
     // intent being received to the time we call the zygote.
@@ -690,7 +746,13 @@ message AndroidStartupMetric {
     optional Slice full_startup = 1;
   }
 
-  // Next id: 8
+  message Activity {
+    optional string name = 1;
+    optional string method = 2;
+    optional Slice slice = 3;
+  }
+
+  // Next id: 12
   message Startup {
     // Random id uniquely identifying an app startup in this trace.
     optional uint32 startup_id = 1;
@@ -700,6 +762,9 @@ message AndroidStartupMetric {
 
     // Name of the process launched
     optional string process_name = 3;
+
+    // Details about the activities launched
+    repeated Activity activities = 11;
 
     // Did we ask the zygote for a new process
     optional bool zygote_new_process = 4;
@@ -721,6 +786,8 @@ message AndroidStartupMetric {
     // of the reportFullyDrawn slice. This should be longer than the time to
     // first frame as the application decides this after it starts rendering.
     optional Slice report_fully_drawn = 9;
+
+    reserved 10;
   }
 
   repeated Startup startup = 1;
@@ -761,6 +828,7 @@ message AndroidSysUiCujMetrics {
   message Frame {
     // Index of the frame within the single user journey.
     optional int64 number = 1;
+    optional int64 vsync = 5;
     optional int64 ts = 2;
     optional int64 dur = 3;
 
@@ -856,7 +924,7 @@ message TraceMetadata {
 
 // Root message for all Perfetto-based metrics.
 //
-// Next id: 29
+// Next id: 32
 message TraceMetrics {
   reserved 4, 10, 13, 14, 19;
 
@@ -880,6 +948,9 @@ message TraceMetrics {
 
   // ion buffer memory metrics.
   optional AndroidIonMetric android_ion = 9;
+
+  // fastrpc subsystem memory metrics.
+  optional AndroidFastrpcMetric android_fastrpc = 31;
 
   // Statistics about low memory kills.
   optional AndroidLmkMetric android_lmk = 8;
@@ -930,6 +1001,9 @@ message TraceMetrics {
 
   // Detects common bad patterns that might lead to jank.
   optional AndroidJankMetrics android_jank = 29;
+
+  // G2D metrics.
+  optional G2dMetrics g2d = 30;
 
   // Demo extensions.
   extensions 450 to 499;

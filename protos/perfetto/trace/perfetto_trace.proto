@@ -764,6 +764,67 @@ message JavaHprofConfig {
 
 // End of protos/perfetto/config/profiling/java_hprof_config.proto
 
+// Begin of protos/perfetto/common/perf_events.proto
+
+message PerfEvents {
+  // What event to sample on, and how often. Commented from the perspective of
+  // its use in |PerfEventConfig|.
+  message Timebase {
+    // How often the per-cpu sampling will occur. Not guaranteed to be honored
+    // as the kernel can throttle the sampling rate if it's too high.
+    // If unset, an implementation-defined default is used.
+    oneof interval {
+      // Per-cpu sampling frequency in Hz, as requested from the kernel. Not the
+      // same as 1/period.
+      // Details: the actual sampling will still be based on a period, but the
+      // kernel will dynamically adjust it based on the observed event rate, to
+      // approximate this frequency. Works best with steady-rate events like
+      // timers.
+      uint64 frequency = 2;
+
+      // Per-cpu sampling will occur every |period| counts of |event|.
+      // Prefer |frequency| by default, as it's easier to oversample with a
+      // fixed period.
+      uint64 period = 1;
+    }
+
+    // Counting event to use as a timebase for the sampling.
+    // If unset, implies the CPU timer (SW_CPU_CLOCK) as the event,
+    // which is what you usually want.
+    // See common/perf_events.proto for the definitions.
+    oneof event {
+      Counter counter = 4;
+      Tracepoint tracepoint = 3;
+    }
+  }
+
+  enum Counter {
+    UNKNOWN_COUNTER = 0;
+    // software:
+    SW_CPU_CLOCK = 1;
+    SW_PAGE_FAULTS = 2;
+    // hardware:
+    HW_CPU_CYCLES = 10;
+    HW_INSTRUCTIONS = 11;
+  }
+
+  message Tracepoint {
+    // Group and name for the tracepoint, acceptable forms:
+    // * "sched/sched_switch"
+    // * "sched:sched_switch"
+    optional string name = 1;
+
+    // Optional field-level filter for the tracepoint. Only events matching this
+    // filter will be counted (and therefore contribute to the sampling period).
+    // Example: "prev_pid >= 42 && next_pid == 0".
+    // For full syntax, see kernel documentation on "Event filtering":
+    // https://www.kernel.org/doc/Documentation/trace/events.txt
+    optional string filter = 2;
+  }
+}
+
+// End of protos/perfetto/common/perf_events.proto
+
 // Begin of protos/perfetto/config/profiling/perf_event_config.proto
 
 // Configuration for the traced_perf profiler.
@@ -785,7 +846,8 @@ message JavaHprofConfig {
 // Next id: 17
 message PerfEventConfig {
   // What event to sample on, and how often.
-  optional Timebase timebase = 15;
+  // Defined in common/perf_events.proto.
+  optional PerfEvents.Timebase timebase = 15;
 
   // If set, the profiler will sample userspace processes' callstacks at the
   // interval specified by the |timebase|.
@@ -839,8 +901,8 @@ message PerfEventConfig {
   // Do not set *any* of these fields in new configs.
   //
 
-  // Note: legacy configs had to set |all_cpus| to true to pass parsing. We
-  // might start relying on this for compatibility detection in the future.
+  // Note: legacy configs had to set |all_cpus| to true to pass parsing.
+  // We rely on this to detect such configs.
   optional bool all_cpus = 1;
   optional uint32 sampling_frequency = 2;
   optional bool kernel_frames = 12;
@@ -849,39 +911,12 @@ message PerfEventConfig {
   repeated int32 exclude_pid = 6;
   repeated string exclude_cmdline = 7;
   optional uint32 additional_cmdline_count = 11;
-  optional Tracepoint tracepoint = 14;
+  // previously |tracepoint|
+  reserved 14;
 
   //
   // Sub-messages (nested for generated code namespacing).
   //
-
-  message Timebase {
-    // How often the per-cpu sampling will occur. Not guaranteed to be honored
-    // as the kernel can throttle the sampling rate if it's too high.
-    // If unset, an implementation-defined default is used.
-    oneof interval {
-      // Per-cpu sampling frequency in Hz, as requested from the kernel. Not the
-      // same as 1/period.
-      // Details: the actual sampling will still be based on a period, but the
-      // kernel will dynamically adjust it based on the observed event rate, to
-      // approximate this frequency. Works best with steady-rate events like
-      // timers.
-      uint64 frequency = 2;
-
-      // Per-cpu sampling will occur every |period| counts of |event|.
-      // Prefer |frequency| by default, as it's easier to oversample with a
-      // fixed period.
-      uint64 period = 1;
-    }
-
-    // Counting event to use as a time base for the sampling.
-    // If unset, implies the CPU timer (SW_CPU_CLOCK) as the event,
-    // which is what you usually want.
-    oneof event {
-      Counter counter = 4;
-      Tracepoint tracepoint = 3;
-    }
-  }
 
   message CallstackSampling {
     // Defines a set of processes for which samples are retained/skipped. If
@@ -924,30 +959,6 @@ message PerfEventConfig {
     // neither explicitly included nor excluded will be considered. Processes
     // are accepted on a first come, first served basis.
     optional uint32 additional_cmdline_count = 5;
-  }
-
-  enum Counter {
-    UNKNOWN_COUNTER = 0;
-    // software:
-    SW_CPU_CLOCK = 1;
-    SW_PAGE_FAULTS = 2;
-    // hardware:
-    HW_CPU_CYCLES = 10;
-    HW_INSTRUCTIONS = 11;
-  }
-
-  message Tracepoint {
-    // Group and name for the tracepoint, acceptable forms:
-    // * "sched/sched_switch"
-    // * "sched:sched_switch"
-    optional string name = 1;
-
-    // Optional field-level filter for the tracepoint. Only events matching this
-    // filter will be counted (and therefore contribute to the sampling period).
-    // Example: "prev_pid >= 42 && next_pid == 0".
-    // For full syntax, see kernel documentation on "Event filtering":
-    // https://www.kernel.org/doc/Documentation/trace/events.txt
-    optional string filter = 2;
   }
 }
 
@@ -1987,6 +1998,16 @@ message FrameTimelineEvent {
     PRESENT_LATE = 2;
     PRESENT_EARLY = 3;
     PRESENT_DROPPED = 4;
+    PRESENT_UNKNOWN = 5;
+  };
+
+  // Specifies if the predictions for the frame are still valid, expired or
+  // unknown.
+  enum PredictionType {
+    PREDICTION_UNSPECIFIED = 0;
+    PREDICTION_VALID = 1;
+    PREDICTION_EXPIRED = 2;
+    PREDICTION_UNKNOWN = 3;
   };
 
   // Indicates the start of expected timeline slice for SurfaceFrames.
@@ -2043,6 +2064,7 @@ message FrameTimelineEvent {
     // A bitmask of JankType. More than one reason can be attributed to a janky
     // frame.
     optional int32 jank_type = 9;
+    optional PredictionType prediction_type = 10;
   };
 
   // Indicates the start of expected timeline slice for DisplayFrames.
@@ -2087,6 +2109,7 @@ message FrameTimelineEvent {
     // A bitmask of JankType. More than one reason can be attributed to a janky
     // frame.
     optional int32 jank_type = 7;
+    optional PredictionType prediction_type = 8;
   };
 
   // FrameEnd just sends the cookie to indicate that the corresponding
@@ -4436,6 +4459,17 @@ message LowmemoryKillFtraceEvent {
 
 // End of protos/perfetto/trace/ftrace/lowmemorykiller.proto
 
+// Begin of protos/perfetto/trace/ftrace/mali.proto
+
+message MaliTracingMarkWriteFtraceEvent {
+  optional string name = 1;
+  optional int32 pid = 2;
+  optional uint32 type = 3;
+  optional int32 value = 4;
+}
+
+// End of protos/perfetto/trace/ftrace/mali.proto
+
 // Begin of protos/perfetto/trace/ftrace/mdss.proto
 
 message MdpCmdKickoffFtraceEvent {
@@ -5292,6 +5326,7 @@ message FtraceEvent {
     FastrpcDmaStatFtraceEvent fastrpc_dma_stat = 347;
     DpuTracingMarkWriteFtraceEvent dpu_tracing_mark_write = 348;
     G2dTracingMarkWriteFtraceEvent g2d_tracing_mark_write = 349;
+    MaliTracingMarkWriteFtraceEvent mali_tracing_mark_write = 350;
   }
 }
 
@@ -6298,6 +6333,25 @@ message ChromeFrameReporter {
   // |STATE_PRESENTED_PARTIAL|), then indicates whether this frame impacts
   // smoothness.
   optional bool affects_smoothness = 5;
+
+  enum ScrollState {
+    SCROLL_NONE = 0;
+    SCROLL_MAIN_THREAD = 1;
+    SCROLL_COMPOSITOR_THREAD = 2;
+
+    // Used when it can't be determined wheter a scroll is in progress or not.
+    SCROLL_UNKNOWN = 3;
+  }
+
+  // The type of active scroll
+  optional ScrollState scroll_state = 6;
+
+  // If any main thread animation is active during this frame.
+  optional bool has_main_animation = 7;
+  // If any compositor thread animation is active during this frame.
+  optional bool has_compositor_animation = 8;
+  // If any touch-driven UX (not scroll) is active during this frame.
+  optional bool has_smooth_input_main = 9;
 }
 
 // End of protos/perfetto/trace/track_event/chrome_frame_reporter.proto
@@ -6513,6 +6567,7 @@ message ChromeUserEvent {
 message ChromeWindowHandleEventInfo {
   optional uint32 dpi = 1;
   optional uint32 message_id = 2;
+  optional fixed64 hwnd_ptr = 3;
 }
 
 // End of protos/perfetto/trace/track_event/chrome_window_handle_event_info.proto
@@ -6743,8 +6798,6 @@ message TrackEvent {
   oneof source_location_field {
     // Non-interned field.
     SourceLocation source_location = 33;
-    // TODO(ssid): The interned source locations are not parsed by trace
-    // processor.
     // Interned field.
     uint64 source_location_iid = 34;
   }
@@ -7465,6 +7518,11 @@ message ProfilePacket {
 
   repeated ProcessHeapSamples process_dumps = 5;
   message ProcessHeapSamples {
+    enum ClientError {
+      CLIENT_ERROR_NONE = 0;
+      CLIENT_ERROR_HIT_TIMEOUT = 1;
+      CLIENT_ERROR_INVALID_STACK_BOUNDS = 2;
+    }
     optional uint64 pid = 1;
 
     // This process was profiled from startup.
@@ -7481,7 +7539,11 @@ message ProfilePacket {
 
     // If disconnected, this disconnect was caused by the client overrunning
     // the buffer.
+    // Equivalent to client_error == CLIENT_ERROR_HIT_TIMEOUT
+    // on new S builds.
     optional bool buffer_overran = 7;
+
+    optional ClientError client_error = 14;
 
     // If disconnected, this disconnected was caused by the shared memory
     // buffer being corrupted. THIS IS ALWAYS A BUG IN HEAPPROFD OR CLIENT
@@ -7604,11 +7666,11 @@ message PerfSample {
   // Execution state that the process was sampled at.
   optional Profiling.CpuMode cpu_mode = 5;
 
-  // Value of the timebase counter (since the beginning).
+  // Value of the timebase counter (since the event was configured, no deltas).
   optional uint64 timebase_count = 6;
 
   // Unwound callstack. Might be partial, in which case a synthetic "error"
-  // frame is appended, and |unwind_error| is set appropriately.
+  // frame is appended, and |unwind_error| is set accordingly.
   optional uint64 callstack_iid = 4;
 
   // If set, stack unwinding was incomplete due to an error.
@@ -7654,6 +7716,12 @@ message PerfSample {
   optional ProducerEvent producer_event = 19;
 }
 
+// Submessage for TracePacketDefaults.
+message PerfSampleDefaults {
+  // The sampling timebase. Might not be identical to the data source config if
+  // the implementation decided to default/override some parameters.
+  optional PerfEvents.Timebase timebase = 1;
+}
 // End of protos/perfetto/trace/profiling/profile_packet.proto
 
 // Begin of protos/perfetto/trace/profiling/smaps.proto
@@ -7983,6 +8051,9 @@ message TracePacketDefaults {
 
   // Default values for TrackEvents (e.g. default track).
   optional TrackEventDefaults track_event_defaults = 11;
+
+  // Defaults for perf profiler packets (PerfSample).
+  optional PerfSampleDefaults perf_sample_defaults = 12;
 }
 // End of protos/perfetto/trace/trace_packet_defaults.proto
 
@@ -8092,7 +8163,7 @@ message ThreadDescriptor {
 // Describes the attributes for a Chrome process. Must be paired with a
 // ProcessDescriptor in the same TrackDescriptor.
 //
-// Next id: 4.
+// Next id: 6.
 message ChromeProcessDescriptor {
   // See chromium's content::ProcessType.
   enum ProcessType {
@@ -8115,6 +8186,19 @@ message ChromeProcessDescriptor {
   // Name of the hosting app for WebView. Used to match renderer processes to
   // their hosting apps.
   optional string host_app_package_name = 4;
+
+  // The ID to link crashes to trace.
+  // Notes:
+  // * The ID is per process. So, each trace may contain many IDs, and you need
+  //   to look for the ID from crashed process to find the crash report.
+  // * Having a "chrome-trace-id" in crash doesn't necessarily mean we can
+  //   get an uploaded trace, since uploads could have failed.
+  // * On the other hand, if there was a crash during the session and trace was
+  //   uploaded, it is very likely to find a crash report with the trace ID.
+  // * This is not crash ID or trace ID. It is just a random 64-bit number
+  //   recorded in both traces and crashes. It is possible to have collisions,
+  //   though very rare.
+  optional uint64 crash_trace_id = 5;
 }
 
 // End of protos/perfetto/trace/track_event/chrome_process_descriptor.proto
