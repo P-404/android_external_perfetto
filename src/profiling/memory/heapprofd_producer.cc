@@ -350,6 +350,7 @@ void HeapprofdProducer::ActiveDataSourceWatchdogCheck() {
 __attribute__((noreturn)) void HeapprofdProducer::TerminateProcess(
     int exit_status) {
   PERFETTO_CHECK(mode_ == HeapprofdMode::kChild);
+  PERFETTO_LOG("Shutting down child heapprofd (status %d).", exit_status);
   exit(exit_status);
 }
 
@@ -518,7 +519,7 @@ void HeapprofdProducer::SignalRunningProcesses(DataSource* data_source) {
 
 void HeapprofdProducer::StartDataSource(DataSourceInstanceID id,
                                         const DataSourceConfig&) {
-  PERFETTO_DLOG("Start DataSource");
+  PERFETTO_DLOG("Starting data source %" PRIu64, id);
 
   auto it = data_sources_.find(id);
   if (it == data_sources_.end()) {
@@ -577,6 +578,8 @@ void HeapprofdProducer::StopDataSource(DataSourceInstanceID id) {
           "Trying to stop non existing data source: %" PRIu64, id);
     return;
   }
+
+  PERFETTO_DLOG("Stopping data source %" PRIu64, id);
 
   DataSource& data_source = it->second;
   data_source.was_stopped = true;
@@ -734,6 +737,7 @@ void HeapprofdProducer::DumpProcessesInDataSource(DataSource* ds) {
 }
 
 void HeapprofdProducer::DumpAll() {
+  PERFETTO_LOG("Received signal. Dumping all data sources.");
   for (auto& id_and_data_source : data_sources_)
     DumpProcessesInDataSource(&id_and_data_source.second);
 }
@@ -1190,8 +1194,14 @@ void HeapprofdProducer::HandleSocketDisconnected(
   DataSource& ds = it->second;
 
   auto process_state_it = ds.process_states.find(pid);
-  if (process_state_it == ds.process_states.end())
+  if (process_state_it == ds.process_states.end()) {
+    PERFETTO_ELOG("Unexpected disconnect from %d", pid);
     return;
+  }
+
+  PERFETTO_LOG("%d disconnected from heapprofd (ds shutting down: %d).", pid,
+               ds.shutting_down);
+
   ProcessState& process_state = process_state_it->second;
   process_state.disconnected = !ds.shutting_down;
   process_state.error_state = stats.error_state;

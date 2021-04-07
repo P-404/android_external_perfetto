@@ -497,6 +497,10 @@ message AndroidPowerConfig {
 
   // Where available enables per-power-rail measurements.
   optional bool collect_power_rails = 3;
+
+  // Provides a breakdown of energy estimation for various subsystem (e.g. GPU).
+  // Available from Android S.
+  optional bool collect_energy_estimation_breakdown = 4;
 }
 
 // End of protos/perfetto/config/power/android_power_config.proto
@@ -1564,13 +1568,14 @@ message TraceConfig {
   optional uint64 max_file_size_bytes = 10;
 
   // Contains flags which override the default values of the guardrails inside
-  // Perfetto. These values are only affect userdebug builds.
+  // Perfetto.
   message GuardrailOverrides {
     // Override the default limit (in bytes) for uploading data to server within
     // a 24 hour period.
+    // On R-, this override only affected userdebug builds. Since S, it also
+    // affects user builds.
     optional uint64 max_upload_per_day_bytes = 1;
   }
-
   optional GuardrailOverrides guardrail_overrides = 11;
 
   // When true, data sources are not started until an explicit call to
@@ -1730,20 +1735,52 @@ message TraceConfig {
   }
   optional CompressionType compression_type = 24;
 
-  // Android-only. Not for general use. If set, saves a Dropbox trace into an
+  // Android-only. Not for general use. If set, saves the trace into an
   // incident. This field is read by perfetto_cmd, rather than the tracing
-  // service. All fields are mandatory.
+  // service. This field must be set when passing the --upload flag to
+  // perfetto_cmd.
   message IncidentReportConfig {
+    // In this message, either:
+    //  * all of |destination_package|, |destination_class| and |privacy_level|
+    //    must be set.
+    //  * |skip_incidentd| must be explicitly set to true.
+
     optional string destination_package = 1;
     optional string destination_class = 2;
     // Level of filtering in the requested incident. See |Destination| in
     // frameworks/base/core/proto/android/privacy.proto.
     optional int32 privacy_level = 3;
+
+    // If true, then skips saving the trace to incidentd.
+    //
+    // This flag is useful in testing (e.g. Perfetto-statsd integration tests)
+    // or when we explicitly don't want traces to go to incidentd even when they
+    // usually would (e.g. configs deployed using statsd but only used for
+    // inclusion in bugreports using |bugreport_score|).
+    //
+    // The motivation for having this flag, instead of just not setting
+    // |incident_report_config|, is prevent accidents where
+    // |incident_report_config| is omitted by mistake.
+    optional bool skip_incidentd = 5;
+
     // If true, do not write the trace into dropbox (i.e. incident only).
     // Otherwise, write to both dropbox and incident.
-    optional bool skip_dropbox = 4;
+    // TODO(lalitm): remove this field as we no longer use Dropbox.
+    optional bool skip_dropbox = 4 [deprecated = true];
   }
   optional IncidentReportConfig incident_report_config = 25;
+
+  enum StatsdLogging {
+    STATSD_LOGGING_UNSPECIFIED = 0;
+    STATSD_LOGGING_ENABLED = 1;
+    STATSD_LOGGING_DISABLED = 2;
+  }
+
+  // Android-only. Not for general use. If specified, sets the logging to statsd
+  // of guardrails and checkpoints in the tracing service. perfetto_cmd sets
+  // this to enabled (if not explicitly set in the config) when specifying
+  // --upload.
+  optional StatsdLogging statsd_logging = 31;
 
   // DEPRECATED. Was trace_uuid, use trace_uuid_msb and trace_uuid_lsb instead.
   reserved 26;
@@ -2065,6 +2102,7 @@ message FrameTimelineEvent {
     // frame.
     optional int32 jank_type = 9;
     optional PredictionType prediction_type = 10;
+    optional bool is_buffer = 11;
   };
 
   // Indicates the start of expected timeline slice for DisplayFrames.
@@ -2255,6 +2293,11 @@ message ChromeMetadataPacket {
   // Version code of Chrome used by Android's Play Store. This field is only set
   // on Android.
   optional int32 chrome_version_code = 2;
+
+  // Comma separated list of enabled categories for tracing. The list of
+  // possible category strings are listed in code
+  // base/trace_event/builtin_categories.h.
+  optional string enabled_categories = 3;
 }
 
 // Metadata related to background tracing scenarios, states and triggers.
@@ -2406,6 +2449,8 @@ message ChromeLegacyJsonTrace {
 message ChromeEventBundle {
   // Deprecated, use TrackEvent protos instead.
   repeated ChromeTraceEvent trace_events = 1 [deprecated = true];
+  // TODO(ssid): This should be deprecated in favor of ChromeMetadataPacket
+  // which contains typed fields.
   repeated ChromeMetadata metadata = 2;
   // ftrace output from CrOS and Cast system tracing agents.
   // TODO(eseckler): Replace system traces with native perfetto service.
@@ -3067,6 +3112,16 @@ message CpuhpLatencyFtraceEvent {
 }
 
 // End of protos/perfetto/trace/ftrace/cpuhp.proto
+
+// Begin of protos/perfetto/trace/ftrace/dmabuf_heap.proto
+
+message DmaHeapStatFtraceEvent {
+  optional uint64 inode = 1;
+  optional int64 len = 2;
+  optional uint64 total_allocated = 3;
+}
+
+// End of protos/perfetto/trace/ftrace/dmabuf_heap.proto
 
 // Begin of protos/perfetto/trace/ftrace/dpu.proto
 
@@ -5327,6 +5382,7 @@ message FtraceEvent {
     DpuTracingMarkWriteFtraceEvent dpu_tracing_mark_write = 348;
     G2dTracingMarkWriteFtraceEvent g2d_tracing_mark_write = 349;
     MaliTracingMarkWriteFtraceEvent mali_tracing_mark_write = 350;
+    DmaHeapStatFtraceEvent dma_heap_stat = 351;
   }
 }
 
@@ -6352,6 +6408,10 @@ message ChromeFrameReporter {
   optional bool has_compositor_animation = 8;
   // If any touch-driven UX (not scroll) is active during this frame.
   optional bool has_smooth_input_main = 9;
+
+  // Whether the frame contained any missing content (i.e. whether there was
+  // checkerboarding in the frame).
+  optional bool has_missing_content = 10;
 }
 
 // End of protos/perfetto/trace/track_event/chrome_frame_reporter.proto
@@ -6519,6 +6579,13 @@ message ChromeMojoEventInfo {
   // handle watcher, recorded when an event if notified to the watcher. The code
   // that runs within the track event belongs to the interface.
   optional string watcher_notify_interface_tag = 1;
+
+  // The hash of the IPC message that is being handled.
+  optional uint32 ipc_hash = 2;
+
+  // A static string representing the mojo interface name of the message that is
+  // being handled.
+  optional string mojo_interface_tag = 3;
 }
 
 // End of protos/perfetto/trace/track_event/chrome_mojo_event_info.proto
@@ -7248,6 +7315,67 @@ message TracingServiceEvent {
 
 // End of protos/perfetto/trace/perfetto/tracing_service_event.proto
 
+// Begin of protos/perfetto/common/android_energy_consumer_descriptor.proto
+
+// Energy consumer based on aidl class:
+// android.hardware.power.stats.EnergyConsumer.
+message AndroidEnergyConsumer {
+  // Unique ID of this energy consumer.  Matches the ID in a
+  // AndroidEnergyEstimationBreakdown.
+  optional int32 energy_consumer_id = 1;
+
+  // For a group of energy consumers of the same logical type, sorting by
+  // ordinal gives their physical order. Ordinals must be consecutive integers
+  // starting from 0.
+  optional int32 ordinal = 2;
+
+  // Type of this energy consumer.
+  optional string type = 3;
+
+  // Unique name of this energy consumer. Vendor/device specific. Opaque to
+  // framework.
+  optional string name = 4;
+}
+
+message AndroidEnergyConsumerDescriptor {
+  repeated AndroidEnergyConsumer energy_consumers = 1;
+}
+
+// End of protos/perfetto/common/android_energy_consumer_descriptor.proto
+
+// Begin of protos/perfetto/trace/power/android_energy_estimation_breakdown.proto
+
+// Energy data retrieve using the ODPM(On Device Power Monitor) API.
+// This proto represents the aidl class:
+// android.hardware.power.stats.EnergyConsumerResult.
+message AndroidEnergyEstimationBreakdown {
+  // The first trace packet of each session should include a energy consumer
+  // descriptor.
+  optional AndroidEnergyConsumerDescriptor energy_consumer_descriptor = 1;
+
+  // ID of the AndroidEnergyConsumer associated with this result.  Matches
+  // the energy_consumer_id in the AndroidEnergyConsumerDescriptor that
+  // should be sent at the beginning of a trace.
+  optional int32 energy_consumer_id = 2;
+
+  // Total accumulated energy since boot in microwatt-seconds (uWs)
+  optional int64 energy_uws = 3;
+
+  message EnergyUidBreakdown {
+    // Android ID/Linux UID, the accumulated energy is attributed to.
+    optional int32 uid = 1;
+
+    // Accumulated energy since boot in microwatt-seconds (uWs).
+    optional int64 energy_uws = 2;
+  }
+  // Optional attributed energy per Android ID / Linux UID for this
+  // EnergyConsumer. Sum total of attributed energy must be less than or equal
+  // to total accumulated energy.
+  repeated EnergyUidBreakdown per_uid_breakdown = 4;
+}
+
+// End of protos/perfetto/trace/power/android_energy_estimation_breakdown.proto
+
 // Begin of protos/perfetto/trace/power/battery_counters.proto
 
 message BatteryCounters {
@@ -7393,7 +7521,10 @@ message HeapGraphType {
 }
 
 message HeapGraphObject {
-  optional uint64 id = 1;
+  oneof identifier {
+    uint64 id = 1;
+    uint64 id_delta = 7;
+  }
 
   // Index for InternedData.types for the name of the type of this object.
   optional uint64 type_id = 2;
@@ -8262,7 +8393,7 @@ message ChromeThreadDescriptor {
 // Values for counters that are only emitted on a single packet sequence can
 // optionally be delta-encoded, see |is_incremental|.
 //
-// Next id: 6.
+// Next id: 7.
 message CounterDescriptor {
   // Built-in counters, usually with special meaning in the client library,
   // trace processor, legacy JSON format, or UI. Trace processor will infer a
@@ -8303,6 +8434,10 @@ message CounterDescriptor {
   // Type of the counter's values. Built-in counters imply a value for this
   // field.
   optional Unit unit = 3;
+
+  // In order to use a unit not defined as a part of |Unit|, a free-form unit
+  // name can be used instead.
+  optional string unit_name = 6;
 
   // Multiplication factor of this counter's values, e.g. to supply
   // COUNTER_THREAD_TIME_NS timestamps in microseconds instead.
@@ -8428,7 +8563,7 @@ message Trigger {
 // See the [Buffers and Dataflow](/docs/concepts/buffers.md) doc for details.
 //
 // Next reserved id: 14 (up to 15).
-// Next id: 77.
+// Next id: 78.
 message TracePacket {
   // The timestamp of the TracePacket.
   // By default this timestamps refers to the trace clock (CLOCK_BOOTTIME on
@@ -8488,6 +8623,7 @@ message TracePacket {
     GpuMemTotalEvent gpu_mem_total_event = 71;
     MemoryTrackerSnapshot memory_tracker_snapshot = 73;
     FrameTimelineEvent frame_timeline_event = 76;
+    AndroidEnergyEstimationBreakdown android_energy_estimation_breakdown = 77;
 
     // Only used in profile packets.
     ProfiledFrameSymbols profiled_frame_symbols = 55;

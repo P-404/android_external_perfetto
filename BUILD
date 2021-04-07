@@ -516,6 +516,7 @@ filegroup(
         "include/perfetto/tracing/interceptor.h",
         "include/perfetto/tracing/internal/basic_types.h",
         "include/perfetto/tracing/internal/checked_scope.h",
+        "include/perfetto/tracing/internal/compile_time_hash.h",
         "include/perfetto/tracing/internal/data_source_internal.h",
         "include/perfetto/tracing/internal/in_process_tracing_backend.h",
         "include/perfetto/tracing/internal/interceptor_trace_writer.h",
@@ -528,6 +529,7 @@ filegroup(
         "include/perfetto/tracing/internal/track_event_macros.h",
         "include/perfetto/tracing/locked_handle.h",
         "include/perfetto/tracing/platform.h",
+        "include/perfetto/tracing/string_helpers.h",
         "include/perfetto/tracing/trace_writer_base.h",
         "include/perfetto/tracing/traced_value.h",
         "include/perfetto/tracing/traced_value_forward.h",
@@ -549,7 +551,7 @@ filegroup(
         "src/android_internal/atrace_hal.h",
         "src/android_internal/health_hal.h",
         "src/android_internal/incident_service.h",
-        "src/android_internal/power_stats_hal.h",
+        "src/android_internal/power_stats.h",
         "src/android_internal/statsd_logging.h",
         "src/android_internal/tracing_service_proxy.h",
     ],
@@ -689,6 +691,16 @@ filegroup(
     ],
 )
 
+perfetto_cc_proto_descriptor(
+    name = "src_perfetto_cmd_gen_cc_config_descriptor",
+    deps = [
+        ":protos_perfetto_config_perfetto_config_descriptor",
+    ],
+    outs = [
+        "src/perfetto_cmd/perfetto_config.descriptor.h",
+    ],
+)
+
 # GN target: //src/perfetto_cmd:perfetto_cmd
 filegroup(
     name = "src_perfetto_cmd_perfetto_cmd",
@@ -701,7 +713,6 @@ filegroup(
         "src/perfetto_cmd/pbtxt_to_pb.h",
         "src/perfetto_cmd/perfetto_cmd.cc",
         "src/perfetto_cmd/perfetto_cmd.h",
-        "src/perfetto_cmd/perfetto_config.descriptor.h",
         "src/perfetto_cmd/rate_limiter.cc",
         "src/perfetto_cmd/rate_limiter.h",
     ],
@@ -889,6 +900,7 @@ genrule(
         "src/trace_processor/metrics/android/android_cpu.sql",
         "src/trace_processor/metrics/android/android_cpu_agg.sql",
         "src/trace_processor/metrics/android/android_cpu_raw_metrics_per_core.sql",
+        "src/trace_processor/metrics/android/android_dma_heap.sql",
         "src/trace_processor/metrics/android/android_fastrpc.sql",
         "src/trace_processor/metrics/android/android_gpu.sql",
         "src/trace_processor/metrics/android/android_hwcomposer.sql",
@@ -908,7 +920,6 @@ genrule(
         "src/trace_processor/metrics/android/android_surfaceflinger.sql",
         "src/trace_processor/metrics/android/android_sysui_cuj.sql",
         "src/trace_processor/metrics/android/android_task_names.sql",
-        "src/trace_processor/metrics/android/android_task_state.sql",
         "src/trace_processor/metrics/android/android_thread_time_in_state.sql",
         "src/trace_processor/metrics/android/composition_layers.sql",
         "src/trace_processor/metrics/android/cpu_info.sql",
@@ -1996,6 +2007,28 @@ perfetto_proto_library(
     visibility = PERFETTO_CONFIG.public_visibility,
 )
 
+# GN target: //protos/perfetto/config:perfetto_config_descriptor
+perfetto_proto_descriptor(
+    name = "protos_perfetto_config_perfetto_config_descriptor",
+    deps = [
+        ":protos_perfetto_config_perfetto_config_protos",
+    ],
+    outs = [
+        "protos_perfetto_config_perfetto_config_descriptor.bin",
+    ],
+)
+
+# GN target: //protos/perfetto/config:perfetto_config_descriptor
+perfetto_proto_library(
+    name = "protos_perfetto_config_perfetto_config_protos",
+    srcs = [
+        "protos/perfetto/config/perfetto_config.proto",
+    ],
+    visibility = [
+        PERFETTO_CONFIG.proto_library_visibility,
+    ],
+)
+
 # GN target: //protos/perfetto/config/power:cpp
 perfetto_cc_protocpp_library(
     name = "protos_perfetto_config_power_cpp",
@@ -2317,6 +2350,7 @@ perfetto_proto_library(
         "protos/perfetto/metrics/android/batt_metric.proto",
         "protos/perfetto/metrics/android/cpu_metric.proto",
         "protos/perfetto/metrics/android/display_metrics.proto",
+        "protos/perfetto/metrics/android/dma_heap_metric.proto",
         "protos/perfetto/metrics/android/fastrpc_metric.proto",
         "protos/perfetto/metrics/android/g2d_metric.proto",
         "protos/perfetto/metrics/android/gpu_metric.proto",
@@ -2527,6 +2561,7 @@ perfetto_proto_library(
         "protos/perfetto/trace/ftrace/clk.proto",
         "protos/perfetto/trace/ftrace/compaction.proto",
         "protos/perfetto/trace/ftrace/cpuhp.proto",
+        "protos/perfetto/trace/ftrace/dmabuf_heap.proto",
         "protos/perfetto/trace/ftrace/dpu.proto",
         "protos/perfetto/trace/ftrace/ext4.proto",
         "protos/perfetto/trace/ftrace/f2fs.proto",
@@ -3290,6 +3325,7 @@ perfetto_cc_binary(
         ":protos_perfetto_trace_track_event_zero",
         ":protozero",
         ":src_base_base",
+        ":src_perfetto_cmd_gen_cc_config_descriptor",
         ":src_perfetto_cmd_protos",
     ] + PERFETTO_CONFIG.deps.zlib,
 )
