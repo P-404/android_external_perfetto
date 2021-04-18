@@ -39,8 +39,10 @@
 #include "perfetto/ext/tracing/ipc/producer_ipc_client.h"
 #include "perfetto/tracing/core/data_source_config.h"
 #include "perfetto/tracing/core/data_source_descriptor.h"
+#include "protos/perfetto/trace/profiling/profile_packet.pbzero.h"
 #include "src/profiling/common/producer_support.h"
 #include "src/profiling/common/profiler_guardrails.h"
+#include "src/profiling/memory/shared_ring_buffer.h"
 #include "src/profiling/memory/unwound_messages.h"
 #include "src/profiling/memory/wire_protocol.h"
 
@@ -73,7 +75,8 @@ std::vector<UnwindingWorker> MakeUnwindingWorkers(HeapprofdProducer* delegate,
                                                   size_t n) {
   std::vector<UnwindingWorker> ret;
   for (size_t i = 0; i < n; ++i) {
-    ret.emplace_back(delegate, base::ThreadTaskRunner::CreateAndStart());
+    ret.emplace_back(delegate,
+                     base::ThreadTaskRunner::CreateAndStart("heapprofdunwind"));
   }
   return ret;
 }
@@ -110,6 +113,21 @@ bool IsFile(int fd, const char* fn) {
     return false;
   }
   return fdstat.st_ino == fnstat.st_ino;
+}
+
+protos::pbzero::ProfilePacket::ProcessHeapSamples::ClientError
+ErrorStateToProto(SharedRingBuffer::ErrorState state) {
+  switch (state) {
+    case (SharedRingBuffer::kNoError):
+      return protos::pbzero::ProfilePacket::ProcessHeapSamples::
+          CLIENT_ERROR_NONE;
+    case (SharedRingBuffer::kHitTimeout):
+      return protos::pbzero::ProfilePacket::ProcessHeapSamples::
+          CLIENT_ERROR_HIT_TIMEOUT;
+    case (SharedRingBuffer::kInvalidStackBounds):
+      return protos::pbzero::ProfilePacket::ProcessHeapSamples::
+          CLIENT_ERROR_INVALID_STACK_BOUNDS;
+  }
 }
 
 }  // namespace
@@ -333,6 +351,7 @@ void HeapprofdProducer::ActiveDataSourceWatchdogCheck() {
 __attribute__((noreturn)) void HeapprofdProducer::TerminateProcess(
     int exit_status) {
   PERFETTO_CHECK(mode_ == HeapprofdMode::kChild);
+  PERFETTO_LOG("Shutting down child heapprofd (status %d).", exit_status);
   exit(exit_status);
 }
 
@@ -434,7 +453,8 @@ void HeapprofdProducer::SetupDataSource(DataSourceInstanceID id,
       heapprofd_config.max_heapprofd_cpu_secs();
 
   InterningOutputTracker::WriteFixedInterningsPacket(
-      data_source.trace_writer.get());
+      data_source.trace_writer.get(),
+      protos::pbzero::TracePacket::SEQ_INCREMENTAL_STATE_CLEARED);
   data_sources_.emplace(id, std::move(data_source));
   PERFETTO_DLOG("Set up data source.");
 
@@ -500,7 +520,7 @@ void HeapprofdProducer::SignalRunningProcesses(DataSource* data_source) {
 
 void HeapprofdProducer::StartDataSource(DataSourceInstanceID id,
                                         const DataSourceConfig&) {
-  PERFETTO_DLOG("Start DataSource");
+  PERFETTO_DLOG("Starting data source %" PRIu64, id);
 
   auto it = data_sources_.find(id);
   if (it == data_sources_.end()) {
@@ -559,6 +579,8 @@ void HeapprofdProducer::StopDataSource(DataSourceInstanceID id) {
           "Trying to stop non existing data source: %" PRIu64, id);
     return;
   }
+
+  PERFETTO_DLOG("Stopping data source %" PRIu64, id);
 
   DataSource& data_source = it->second;
   data_source.was_stopped = true;
@@ -679,7 +701,10 @@ void HeapprofdProducer::DumpProcessState(DataSource* data_source,
           proto->set_timestamp(dump_timestamp);
           proto->set_from_startup(from_startup);
           proto->set_disconnected(process_state->disconnected);
-          proto->set_buffer_overran(process_state->buffer_overran);
+          proto->set_buffer_overran(process_state->error_state ==
+                                    SharedRingBuffer::kHitTimeout);
+          proto->set_client_error(
+              ErrorStateToProto(process_state->error_state));
           proto->set_buffer_corrupted(process_state->buffer_corrupted);
           proto->set_hit_guardrail(data_source->hit_guardrail);
           if (heap_name)
@@ -713,6 +738,7 @@ void HeapprofdProducer::DumpProcessesInDataSource(DataSource* ds) {
 }
 
 void HeapprofdProducer::DumpAll() {
+  PERFETTO_LOG("Received signal. Dumping all data sources.");
   for (auto& id_and_data_source : data_sources_)
     DumpProcessesInDataSource(&id_and_data_source.second);
 }
@@ -1169,11 +1195,17 @@ void HeapprofdProducer::HandleSocketDisconnected(
   DataSource& ds = it->second;
 
   auto process_state_it = ds.process_states.find(pid);
-  if (process_state_it == ds.process_states.end())
+  if (process_state_it == ds.process_states.end()) {
+    PERFETTO_ELOG("Unexpected disconnect from %d", pid);
     return;
+  }
+
+  PERFETTO_LOG("%d disconnected from heapprofd (ds shutting down: %d).", pid,
+               ds.shutting_down);
+
   ProcessState& process_state = process_state_it->second;
   process_state.disconnected = !ds.shutting_down;
-  process_state.buffer_overran = stats.hit_timeout;
+  process_state.error_state = stats.error_state;
   process_state.client_spinlock_blocked_us = stats.client_spinlock_blocked_us;
   process_state.buffer_corrupted =
       stats.num_writes_corrupt > 0 || stats.num_reads_corrupt > 0;

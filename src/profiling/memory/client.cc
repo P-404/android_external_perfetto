@@ -46,6 +46,7 @@
 #include "perfetto/ext/base/utils.h"
 #include "src/profiling/memory/sampler.h"
 #include "src/profiling/memory/scoped_spinlock.h"
+#include "src/profiling/memory/shared_ring_buffer.h"
 #include "src/profiling/memory/wire_protocol.h"
 
 namespace perfetto {
@@ -182,8 +183,6 @@ std::shared_ptr<Client> Client::CreateAndHandshake(
     prctl(PR_SET_DUMPABLE, 1);
   }
 
-  size_t num_send_fds = kHandshakeSize;
-
   base::ScopedFile maps(base::OpenFile("/proc/self/maps", O_RDONLY));
   if (!maps) {
     PERFETTO_DFATAL_OR_ELOG("Failed to open /proc/self/maps");
@@ -204,7 +203,7 @@ std::shared_ptr<Client> Client::CreateAndHandshake(
 
   // Send an empty record to transfer fds for /proc/self/maps and
   // /proc/self/mem.
-  if (sock.Send(kSingleByte, sizeof(kSingleByte), fds, num_send_fds) !=
+  if (sock.Send(kSingleByte, sizeof(kSingleByte), fds, kHandshakeSize) !=
       sizeof(kSingleByte)) {
     PERFETTO_DFATAL_OR_ELOG("Failed to send file descriptors.");
     return nullptr;
@@ -372,6 +371,7 @@ bool Client::RecordMalloc(uint32_t heap_id,
   const char* stackend = GetStackEnd(stackptr);
   if (!stackend) {
     PERFETTO_ELOG("Failed to find stackend.");
+    shmem_.SetErrorState(SharedRingBuffer::kInvalidStackBounds);
     return false;
   }
   uint64_t stack_size = static_cast<uint64_t>(stackend - stackptr);
@@ -422,7 +422,7 @@ int64_t Client::SendWireMessageWithRetriesIfBlocking(const WireMessage& msg) {
     }
   }
   if (IsConnected())
-    shmem_.SetHitTimeout();
+    shmem_.SetErrorState(SharedRingBuffer::kHitTimeout);
   PERFETTO_PLOG("Failed to write to shared ring buffer. Disconnecting.");
   return -1;
 }

@@ -16,9 +16,41 @@
 
 -- Create the base tables and views containing the launch spans.
 SELECT RUN_METRIC('android/android_startup_launches.sql');
-SELECT RUN_METRIC('android/android_task_state.sql');
 SELECT RUN_METRIC('android/process_metadata.sql');
 SELECT RUN_METRIC('android/hsc_startups.sql');
+
+-- Create the base CPU span join table.
+SELECT RUN_METRIC('android/android_cpu_agg.sql');
+
+-- Create a span join safe launches view; since both views
+-- being span joined have an "id" column, we need to rename
+-- the id column for launches to disambiguate the two.
+DROP VIEW IF EXISTS launches_span_join_safe;
+CREATE VIEW launches_span_join_safe AS
+SELECT ts, dur, id AS launch_id
+FROM launches;
+
+-- Span join the CPU table with the launches table to get the
+-- breakdown per-cpu.
+DROP TABLE IF EXISTS cpu_freq_sched_per_thread_per_launch;
+CREATE VIRTUAL TABLE cpu_freq_sched_per_thread_per_launch
+USING SPAN_JOIN(
+  launches_span_join_safe,
+  cpu_freq_sched_per_thread PARTITIONED cpu
+);
+
+SELECT RUN_METRIC('android/cpu_info.sql');
+
+DROP VIEW IF EXISTS mcycles_per_core_type_per_launch;
+CREATE VIEW mcycles_per_core_type_per_launch AS
+SELECT
+  launch_id,
+  IFNULL(core_type_per_cpu.core_type, 'unknown') AS core_type,
+  CAST(SUM(dur * freq_khz / 1000) / 1e9 AS INT) AS mcycles
+FROM cpu_freq_sched_per_thread_per_launch
+LEFT JOIN core_type_per_cpu USING (cpu)
+WHERE utid != 0
+GROUP BY 1, 2;
 
 -- Slices for forked processes. Never present in hot starts.
 -- Prefer this over process start_ts, since the process might have
@@ -54,11 +86,20 @@ JOIN process USING(upid)
 JOIN thread ON (process.upid = thread.upid AND process.pid = thread.tid)
 ORDER BY ts;
 
+DROP VIEW IF EXISTS thread_state_extended;
+CREATE VIEW thread_state_extended AS
+SELECT
+  ts,
+  IIF(dur = -1, (SELECT end_ts FROM trace_bounds), dur) AS dur,
+  utid,
+  state
+FROM thread_state;
+
 DROP TABLE IF EXISTS main_thread_state;
 CREATE VIRTUAL TABLE main_thread_state
 USING SPAN_JOIN(
   launch_main_threads PARTITIONED utid,
-  task_state PARTITIONED utid);
+  thread_state_extended PARTITIONED utid);
 
 DROP VIEW IF EXISTS launch_by_thread_state;
 CREATE VIEW launch_by_thread_state AS
@@ -71,7 +112,11 @@ DROP TABLE IF EXISTS main_process_slice;
 CREATE TABLE main_process_slice AS
 SELECT
   launches.id AS launch_id,
-  slice.name AS name,
+  CASE
+    WHEN slice.name LIKE 'OpenDexFilesFromOat%' THEN 'OpenDexFilesFromOat'
+    WHEN slice.name LIKE 'VerifyClass%' THEN 'VerifyClass'
+    ELSE slice.name
+  END AS name,
   AndroidStartupMetric_Slice(
     'dur_ns', SUM(slice.dur),
     'dur_ms', SUM(slice.dur) / 1e6
@@ -90,8 +135,14 @@ WHERE slice.name IN (
   'activityStart',
   'activityRestart',
   'activityResume',
-  'Choreographer#doFrame',
-  'inflate')
+  'inflate',
+  'ResourcesManager#getResources')
+  OR slice.name LIKE 'performResume:%'
+  OR slice.name LIKE 'performCreate:%'
+  OR slice.name LIKE 'location=% status=% filter=% reason=%'
+  OR slice.name LIKE 'OpenDexFilesFromOat%'
+  OR slice.name LIKE 'VerifyClass%'
+  OR slice.name LIKE 'Choreographer#doFrame%'
 GROUP BY 1, 2;
 
 DROP TABLE IF EXISTS report_fully_drawn_per_launch;
@@ -153,6 +204,16 @@ SELECT
         LIMIT 1
       )
     ),
+    'activities', (
+      SELECT RepeatedField(AndroidStartupMetric_Activity(
+        'name', (SELECT STR_SPLIT(s.name, ':', 1)),
+        'method', (SELECT STR_SPLIT(s.name, ':', 0)),
+        'slice', s.slice_proto
+      ))
+      FROM main_process_slice s
+      WHERE s.launch_id = launches.id
+      AND (name LIKE 'performResume:%' OR name LIKE 'performCreate:%')
+    ),
     'zygote_new_process', EXISTS(SELECT TRUE FROM zygote_forks_by_id WHERE id = launches.id),
     'activity_hosting_process_count', (
       SELECT COUNT(1) FROM launch_processes p
@@ -165,23 +226,45 @@ SELECT
         'running_dur_ns', IFNULL(
             (
             SELECT dur FROM launch_by_thread_state l
-            WHERE l.launch_id = launches.id AND state = 'running'
+            WHERE l.launch_id = launches.id AND state = 'Running'
             ), 0),
         'runnable_dur_ns', IFNULL(
             (
             SELECT dur FROM launch_by_thread_state l
-            WHERE l.launch_id = launches.id AND state = 'runnable'
+            WHERE l.launch_id = launches.id AND state = 'R'
             ), 0),
         'uninterruptible_sleep_dur_ns', IFNULL(
             (
             SELECT dur FROM launch_by_thread_state l
-            WHERE l.launch_id = launches.id AND state = 'uninterruptible'
+            WHERE l.launch_id = launches.id AND (state = 'D' or state = 'DK')
             ), 0),
         'interruptible_sleep_dur_ns', IFNULL(
             (
             SELECT dur FROM launch_by_thread_state l
-            WHERE l.launch_id = launches.id AND state = 'interruptible'
+            WHERE l.launch_id = launches.id AND state = 'S'
             ), 0)
+      ),
+      'mcycles_by_core_type', AndroidStartupMetric_McyclesByCoreType(
+        'little', (
+          SELECT mcycles
+          FROM mcycles_per_core_type_per_launch m
+          WHERE m.launch_id = launches.id AND m.core_type = 'little'
+        ),
+        'big', (
+          SELECT mcycles
+          FROM mcycles_per_core_type_per_launch m
+          WHERE m.launch_id = launches.id AND m.core_type = 'big'
+        ),
+        'bigger', (
+          SELECT mcycles
+          FROM mcycles_per_core_type_per_launch m
+          WHERE m.launch_id = launches.id AND m.core_type = 'bigger'
+        ),
+        'unknown', (
+          SELECT mcycles
+          FROM mcycles_per_core_type_per_launch m
+          WHERE m.launch_id = launches.id AND m.core_type = 'unknown'
+        )
       ),
       'to_post_fork', (
         SELECT slice_proto
@@ -244,7 +327,7 @@ SELECT
       'time_choreographer', (
         SELECT slice_proto
         FROM main_process_slice s
-        WHERE s.launch_id = launches.id AND name = 'Choreographer#doFrame'
+        WHERE s.launch_id = launches.id AND name LIKE 'Choreographer#doFrame%'
       ),
       'time_before_start_process', (
         SELECT AndroidStartupMetric_Slice(
@@ -261,6 +344,27 @@ SELECT
         )
         FROM zygote_forks_by_id z
         WHERE z.id = launches.id
+      ),
+      'time_inflate', (
+        SELECT slice_proto
+        FROM main_process_slice s
+        WHERE s.launch_id = launches.id AND name = 'inflate'
+      ),
+      'time_get_resources', (
+        SELECT slice_proto
+        FROM main_process_slice s
+        WHERE s.launch_id = launches.id
+        AND name = 'ResourcesManager#getResources'
+      ),
+      'time_dex_open', (
+        SELECT slice_proto
+        FROM main_process_slice s
+        WHERE s.launch_id = launches.id AND name = 'OpenDexFilesFromOat'
+      ),
+      'time_verify_class', (
+        SELECT slice_proto
+        FROM main_process_slice s
+        WHERE s.launch_id = launches.id AND name = 'VerifyClass'
       )
     ),
     'hsc', (
@@ -282,6 +386,16 @@ SELECT
       ))
       FROM report_fully_drawn_per_launch r
       WHERE r.launch_id = launches.id
+    ),
+    'optimization_status',(
+      SELECT RepeatedField(AndroidStartupMetric_OptimizationStatus(
+        'location', SUBSTR(STR_SPLIT(name, ' status=', 0), LENGTH('location=') + 1),
+        'odex_status', STR_SPLIT(STR_SPLIT(name, ' status=', 1), ' filter=', 0),
+        'compilation_filter', STR_SPLIT(STR_SPLIT(name, ' filter=', 1), ' reason=', 0),
+        'compilation_reason', STR_SPLIT(name, ' reason=', 1)
+      ))
+      FROM main_process_slice s
+      WHERE name LIKE 'location=% status=% filter=% reason=%'
     )
   ) as startup
 FROM launches;

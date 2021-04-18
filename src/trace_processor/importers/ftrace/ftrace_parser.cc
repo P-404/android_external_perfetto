@@ -29,6 +29,7 @@
 
 #include "protos/perfetto/common/gpu_counter_descriptor.pbzero.h"
 #include "protos/perfetto/trace/ftrace/binder.pbzero.h"
+#include "protos/perfetto/trace/ftrace/dmabuf_heap.pbzero.h"
 #include "protos/perfetto/trace/ftrace/dpu.pbzero.h"
 #include "protos/perfetto/trace/ftrace/fastrpc.pbzero.h"
 #include "protos/perfetto/trace/ftrace/ftrace.pbzero.h"
@@ -41,6 +42,7 @@
 #include "protos/perfetto/trace/ftrace/irq.pbzero.h"
 #include "protos/perfetto/trace/ftrace/kmem.pbzero.h"
 #include "protos/perfetto/trace/ftrace/lowmemorykiller.pbzero.h"
+#include "protos/perfetto/trace/ftrace/mali.pbzero.h"
 #include "protos/perfetto/trace/ftrace/mm_event.pbzero.h"
 #include "protos/perfetto/trace/ftrace/oom.pbzero.h"
 #include "protos/perfetto/trace/ftrace/power.pbzero.h"
@@ -103,6 +105,9 @@ FtraceParser::FtraceParser(TraceProcessorContext* context)
       cpu_idle_name_id_(context->storage->InternString("cpuidle")),
       ion_total_id_(context->storage->InternString("mem.ion")),
       ion_change_id_(context->storage->InternString("mem.ion_change")),
+      dma_heap_total_id_(context->storage->InternString("mem.dma_heap")),
+      dma_heap_change_id_(
+          context->storage->InternString("mem.dma_heap_change")),
       ion_total_unknown_id_(context->storage->InternString("mem.ion.unknown")),
       ion_change_unknown_id_(
           context->storage->InternString("mem.ion_change.unknown")),
@@ -397,6 +402,10 @@ util::Status FtraceParser::ParseFtraceEvent(uint32_t cpu,
         ParseIonStat(ts, pid, data);
         break;
       }
+      case FtraceEvent::kDmaHeapStatFieldNumber: {
+        ParseDmaHeapStat(ts, pid, data);
+        break;
+      }
       case FtraceEvent::kSignalGenerateFieldNumber: {
         ParseSignalGenerate(ts, data);
         break;
@@ -535,6 +544,10 @@ util::Status FtraceParser::ParseFtraceEvent(uint32_t cpu,
       }
       case FtraceEvent::kDpuTracingMarkWriteFieldNumber: {
         ParseDpuTracingMarkWrite(ts, pid, data);
+        break;
+      }
+      case FtraceEvent::kMaliTracingMarkWriteFieldNumber: {
+        ParseMaliTracingMarkWrite(ts, pid, data);
         break;
       }
       default:
@@ -806,6 +819,22 @@ void FtraceParser::ParseG2dTracingMarkWrite(int64_t ts,
       tgid, evt.value());
 }
 
+void FtraceParser::ParseMaliTracingMarkWrite(int64_t ts,
+                                             uint32_t pid,
+                                             ConstBytes blob) {
+  protos::pbzero::MaliTracingMarkWriteFtraceEvent::Decoder evt(blob.data,
+                                                               blob.size);
+  if (!evt.type()) {
+    context_->storage->IncrementStats(stats::systrace_parse_failure);
+    return;
+  }
+
+  uint32_t tgid = static_cast<uint32_t>(evt.pid());
+  SystraceParser::GetOrCreate(context_)->ParseTracingMarkWrite(
+      ts, pid, static_cast<char>(evt.type()), false /*trace_begin*/, evt.name(),
+      tgid, evt.value());
+}
+
 /** Parses ion heap events present in Pixel kernels. */
 void FtraceParser::ParseIonHeapGrowOrShrink(int64_t ts,
                                             uint32_t pid,
@@ -880,6 +909,25 @@ void FtraceParser::ParseIonStat(int64_t ts,
   track =
       context_->track_tracker->InternThreadCounterTrack(ion_change_id_, utid);
   context_->event_tracker->PushCounter(ts, static_cast<double>(ion.len()),
+                                       track);
+}
+void FtraceParser::ParseDmaHeapStat(int64_t ts,
+                                    uint32_t pid,
+                                    protozero::ConstBytes data) {
+  protos::pbzero::DmaHeapStatFtraceEvent::Decoder dma_heap(data.data,
+                                                           data.size);
+  // Push the global counter.
+  TrackId track =
+      context_->track_tracker->InternGlobalCounterTrack(dma_heap_total_id_);
+  context_->event_tracker->PushCounter(
+      ts, static_cast<double>(dma_heap.total_allocated()), track);
+
+  // Push the change counter.
+  // TODO(b/121331269): these should really be instant events.
+  UniqueTid utid = context_->process_tracker->GetOrCreateThread(pid);
+  track = context_->track_tracker->InternThreadCounterTrack(dma_heap_change_id_,
+                                                            utid);
+  context_->event_tracker->PushCounter(ts, static_cast<double>(dma_heap.len()),
                                        track);
 }
 

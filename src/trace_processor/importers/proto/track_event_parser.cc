@@ -178,11 +178,16 @@ class TrackEventParser::EventImporter {
       case 'R':  // TRACE_EVENT_PHASE_MARK.
         return ParseThreadInstantEvent();
       case 'b':  // TRACE_EVENT_PHASE_NESTABLE_ASYNC_BEGIN
-        return ParseAsyncBeginEvent();
+      case 'S':
+        return ParseAsyncBeginEvent(phase);
       case 'e':  // TRACE_EVENT_PHASE_NESTABLE_ASYNC_END
+      case 'F':
         return ParseAsyncEndEvent();
       case 'n':  // TRACE_EVENT_PHASE_NESTABLE_ASYNC_INSTANT
         return ParseAsyncInstantEvent();
+      case 'T':
+      case 'p':
+        return ParseAsyncStepEvent(phase);
       case 'M':  // TRACE_EVENT_PHASE_METADATA (process and thread names).
         return ParseMetadataEvent();
       default:
@@ -382,7 +387,11 @@ class TrackEventParser::EventImporter {
     switch (legacy_event_.phase()) {
       case 'b':
       case 'e':
-      case 'n': {
+      case 'n':
+      case 'S':
+      case 'T':
+      case 'p':
+      case 'F': {
         // Intern tracks for legacy async events based on legacy event ids.
         int64_t source_id = 0;
         bool source_id_is_process_scoped = false;
@@ -404,8 +413,12 @@ class TrackEventParser::EventImporter {
 
         // Catapult treats nestable async events of different categories with
         // the same ID as separate tracks. We replicate the same behavior
-        // here.
-        StringId id_scope = category_id_;
+        // here. For legacy async events, it uses different tracks based on
+        // event names.
+        const bool legacy_async =
+            legacy_event_.phase() == 'S' || legacy_event_.phase() == 'T' ||
+            legacy_event_.phase() == 'p' || legacy_event_.phase() == 'F';
+        StringId id_scope = legacy_async ? name_id_ : category_id_;
         if (legacy_event_.has_id_scope()) {
           std::string concat = storage_->GetString(category_id_).ToStdString() +
                                ":" + legacy_event_.id_scope().ToStdString();
@@ -759,15 +772,26 @@ class TrackEventParser::EventImporter {
     return util::OkStatus();
   }
 
-  util::Status ParseAsyncBeginEvent() {
+  util::Status ParseAsyncBeginEvent(char phase) {
+    auto args_inserter = [this, phase](BoundInserter* inserter) {
+      ParseTrackEventArgs(inserter);
+
+      if (phase == 'b')
+        return;
+      PERFETTO_DCHECK(phase == 'S');
+      // For legacy ASYNC_BEGIN, add phase for JSON exporter.
+      std::string phase_string(1, static_cast<char>(phase));
+      StringId phase_id = storage_->InternString(phase_string.c_str());
+      inserter->AddArg(parser_->legacy_event_phase_key_id_,
+                       Variadic::String(phase_id));
+    };
     auto opt_slice_id = context_->slice_tracker->Begin(
-        ts_, track_id_, category_id_, name_id_,
-        [this](BoundInserter* inserter) { ParseTrackEventArgs(inserter); });
+        ts_, track_id_, category_id_, name_id_, args_inserter);
     if (!opt_slice_id.has_value()) {
       return util::OkStatus();
     }
     MaybeParseFlowEvents();
-    // For the time beeing, we only create vtrack slice rows if we need to
+    // For the time being, we only create vtrack slice rows if we need to
     // store thread timestamps/counters.
     if (legacy_event_.use_async_tts()) {
       auto* vtrack_slices = storage_->mutable_virtual_track_slices();
@@ -791,6 +815,27 @@ class TrackEventParser::EventImporter {
           opt_slice_id.value(), event_data_->thread_timestamp,
           event_data_->thread_instruction_count);
     }
+    return util::OkStatus();
+  }
+
+  util::Status ParseAsyncStepEvent(char phase) {
+    // Parse step events as instant events. Reconstructing the begin/end times
+    // of the child slice would be too complicated, see b/178540838. For JSON
+    // export, we still record the original step's phase in an arg.
+    int64_t duration_ns = 0;
+    context_->slice_tracker->Scoped(
+        ts_, track_id_, category_id_, name_id_, duration_ns,
+        [this, phase](BoundInserter* inserter) {
+          ParseTrackEventArgs(inserter);
+
+          PERFETTO_DCHECK(phase == 'T' || phase == 'p');
+          std::string phase_string(1, static_cast<char>(phase));
+          StringId phase_id = storage_->InternString(phase_string.c_str());
+          inserter->AddArg(parser_->legacy_event_phase_key_id_,
+                           Variadic::String(phase_id));
+        });
+    // Step events don't support thread timestamps, so no need to add a row to
+    // virtual_track_slices.
     return util::OkStatus();
   }
 
@@ -967,6 +1012,10 @@ class TrackEventParser::EventImporter {
       log_errors(ParseDebugAnnotationArgs(*it, inserter));
     }
 
+    if (event_.has_source_location_iid()) {
+      log_errors(AddSourceLocationArgs(event_.source_location_iid(), inserter));
+    }
+
     if (event_.has_task_execution()) {
       log_errors(ParseTaskExecutionArgs(event_.task_execution(), inserter));
     }
@@ -1141,6 +1190,33 @@ class TrackEventParser::EventImporter {
     return util::OkStatus();
   }
 
+  util::Status AddSourceLocationArgs(uint64_t iid, BoundInserter* inserter) {
+    if (!iid)
+      return util::ErrStatus("SourceLocation with invalid iid");
+
+    auto* decoder = sequence_state_->LookupInternedMessage<
+        protos::pbzero::InternedData::kSourceLocationsFieldNumber,
+        protos::pbzero::SourceLocation>(iid);
+    if (!decoder)
+      return util::ErrStatus("SourceLocation with invalid iid");
+
+    StringId file_name_id = kNullStringId;
+    StringId function_name_id = kNullStringId;
+    uint32_t line_number = 0;
+
+    file_name_id = storage_->InternString(decoder->file_name());
+    function_name_id = storage_->InternString(decoder->function_name());
+    line_number = decoder->line_number();
+
+    inserter->AddArg(parser_->source_location_file_name_key_id_,
+                     Variadic::String(file_name_id));
+    inserter->AddArg(parser_->source_location_function_name_key_id_,
+                     Variadic::String(function_name_id));
+    inserter->AddArg(parser_->source_location_line_number_key_id_,
+                     Variadic::UnsignedInteger(line_number));
+    return util::OkStatus();
+  }
+
   util::Status ParseLogMessage(ConstBytes blob, BoundInserter* inserter) {
     if (!utid_)
       return util::ErrStatus("LogMessage without thread association");
@@ -1236,6 +1312,12 @@ TrackEventParser::TrackEventParser(TraceProcessorContext* context,
           context->storage->InternString("task.posted_from.line_number")),
       log_message_body_key_id_(
           context->storage->InternString("track_event.log_message")),
+      source_location_function_name_key_id_(
+          context->storage->InternString("source.function_name")),
+      source_location_file_name_key_id_(
+          context->storage->InternString("source.file_name")),
+      source_location_line_number_key_id_(
+          context->storage->InternString("source.line_number")),
       raw_legacy_event_id_(
           context->storage->InternString("track_event.legacy_event")),
       legacy_event_passthrough_utid_id_(
@@ -1285,6 +1367,8 @@ TrackEventParser::TrackEventParser(TraceProcessorContext* context,
           context->storage->InternString("legacy_ipc.line")),
       chrome_host_app_package_name_id_(
           context->storage->InternString("chrome.host_app_package_name")),
+      chrome_crash_trace_id_name_id_(
+          context->storage->InternString("chrome.crash_trace_id")),
       chrome_legacy_ipc_class_ids_{
           {context->storage->InternString("UNSPECIFIED"),
            context->storage->InternString("AUTOMATION"),
@@ -1490,12 +1574,16 @@ void TrackEventParser::ParseChromeProcessDescriptor(
   // Don't override system-provided names.
   context_->process_tracker->SetProcessNameIfUnset(upid, name_id);
 
+  ArgsTracker::BoundInserter process_args =
+      context_->process_tracker->AddArgsTo(upid);
   if (decoder.has_host_app_package_name()) {
-    ArgsTracker::BoundInserter process_args =
-        context_->process_tracker->AddArgsTo(upid);
     process_args.AddArg(chrome_host_app_package_name_id_,
                         Variadic::String(context_->storage->InternString(
                             decoder.host_app_package_name())));
+  }
+  if (decoder.has_crash_trace_id()) {
+    process_args.AddArg(chrome_crash_trace_id_name_id_,
+                        Variadic::UnsignedInteger(decoder.crash_trace_id()));
   }
 }
 

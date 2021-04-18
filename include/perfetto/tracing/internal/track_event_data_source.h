@@ -79,14 +79,27 @@ static constexpr bool IsValidTraceLambda() {
   return IsValidTraceLambdaImpl<T>(nullptr);
 }
 
+// Checks if |T| is a valid track.
+template <typename T>
+static constexpr bool IsValidTrack() {
+  return std::is_convertible<T, Track>::value;
+}
+
+// Checks if |T| is a valid non-counter track.
+template <typename T>
+static constexpr bool IsValidNormalTrack() {
+  return std::is_convertible<T, Track>::value &&
+         !std::is_convertible<T, CounterTrack>::value;
+}
+
 // Because the user can use arbitrary timestamp types, we can't compare against
 // any known base type here. Instead, we check that a track or a trace lambda
 // isn't being interpreted as a timestamp.
 template <typename T,
           typename CanBeConvertedToNsCheck = decltype(
               ::perfetto::ConvertTimestampToTraceTimeNs(std::declval<T>())),
-          typename NotTrackCheck = typename std::enable_if<
-              !std::is_convertible<T, Track>::value>::type,
+          typename NotTrackCheck =
+              typename std::enable_if<!IsValidNormalTrack<T>()>::type,
           typename NotLambdaCheck =
               typename std::enable_if<!IsValidTraceLambda<T>()>::type>
 static constexpr bool IsValidTimestamp() {
@@ -316,8 +329,8 @@ class TrackEventDataSource
             typename ArgumentFunction = void (*)(EventContext),
             typename ArgumentFunctionCheck = typename std::enable_if<
                 IsValidTraceLambda<ArgumentFunction>()>::type,
-            typename TrackTypeCheck = typename std::enable_if<
-                std::is_convertible<TrackType, Track>::value>::type>
+            typename TrackTypeCheck =
+                typename std::enable_if<IsValidNormalTrack<TrackType>()>::type>
   static void TraceForCategory(uint32_t instances,
                                const CategoryType& category,
                                const char* event_name,
@@ -336,8 +349,8 @@ class TrackEventDataSource
             typename TimestampType = uint64_t,
             typename TimestampTypeCheck = typename std::enable_if<
                 IsValidTimestamp<TimestampType>()>::type,
-            typename TrackTypeCheck = typename std::enable_if<
-                std::is_convertible<TrackType, Track>::value>::type>
+            typename TrackTypeCheck =
+                typename std::enable_if<IsValidNormalTrack<TrackType>()>::type>
   static void TraceForCategory(uint32_t instances,
                                const CategoryType& category,
                                const char* event_name,
@@ -496,6 +509,45 @@ class TrackEventDataSource
         });
   }
 
+  // Trace point with with a counter sample.
+  template <typename CategoryType, typename ValueType>
+  static void TraceForCategory(uint32_t instances,
+                               const CategoryType& category,
+                               const char*,
+                               perfetto::protos::pbzero::TrackEvent::Type type,
+                               const CounterTrack& track,
+                               ValueType value) PERFETTO_ALWAYS_INLINE {
+    PERFETTO_DCHECK(type == perfetto::protos::pbzero::TrackEvent::TYPE_COUNTER);
+    TraceForCategory(instances, category, /*name=*/nullptr, type, track,
+                     TrackEventInternal::GetTimeNs(), value);
+  }
+
+  // Trace point with with a timestamp and a counter sample.
+  template <typename CategoryType,
+            typename TimestampType = uint64_t,
+            typename TimestampTypeCheck = typename std::enable_if<
+                IsValidTimestamp<TimestampType>()>::type,
+            typename ValueType>
+  static void TraceForCategory(uint32_t instances,
+                               const CategoryType& category,
+                               const char*,
+                               perfetto::protos::pbzero::TrackEvent::Type type,
+                               const CounterTrack& track,
+                               TimestampType timestamp,
+                               ValueType value) PERFETTO_ALWAYS_INLINE {
+    PERFETTO_DCHECK(type == perfetto::protos::pbzero::TrackEvent::TYPE_COUNTER);
+    TraceForCategoryImpl(
+        instances, category, /*name=*/nullptr, type, track, timestamp,
+        [&](EventContext event_ctx) {
+          if (std::is_integral<ValueType>::value) {
+            event_ctx.event()->set_counter_value(static_cast<int64_t>(value));
+          } else {
+            event_ctx.event()->set_double_counter_value(
+                static_cast<double>(value));
+          }
+        });
+  }
+
   // Initialize the track event library. Should be called before tracing is
   // enabled.
   static bool Register() {
@@ -578,8 +630,8 @@ class TrackEventDataSource
       typename ArgumentFunction = void (*)(EventContext),
       typename ArgumentFunctionCheck =
           typename std::enable_if<IsValidTraceLambda<ArgumentFunction>()>::type,
-      typename TrackTypeCheck = typename std::enable_if<
-          std::is_convertible<TrackType, Track>::value>::type>
+      typename TrackTypeCheck =
+          typename std::enable_if<IsValidTrack<TrackType>()>::type>
   static void TraceForCategoryImpl(
       uint32_t instances,
       const CategoryType& category,
@@ -601,16 +653,39 @@ class TrackEventDataSource
             return;
           }
 
+          // TODO(skyostil): Support additional clock ids.
+          TraceTimestamp trace_timestamp =
+              ::perfetto::ConvertTimestampToTraceTimeNs(timestamp);
+          PERFETTO_DCHECK(trace_timestamp.clock_id ==
+                          TrackEventInternal::GetClockId());
+
+          // Make sure incremental state is valid.
+          TraceWriterBase* trace_writer = ctx.tls_inst_->trace_writer.get();
+          TrackEventIncrementalState* incr_state = ctx.GetIncrementalState();
+          if (incr_state->was_cleared) {
+            incr_state->was_cleared = false;
+            TrackEventInternal::ResetIncrementalState(
+                trace_writer, trace_timestamp.nanoseconds);
+          }
+
+          // Write the track descriptor before any event on the track.
+          if (track) {
+            TrackEventInternal::WriteTrackDescriptorIfNeeded(
+                track, trace_writer, incr_state);
+          }
+
+          // Write the event itself.
           {
-            TraceTimestamp trace_timestamp =
-                ::perfetto::ConvertTimestampToTraceTimeNs(timestamp);
-            // TODO(skyostil): Support additional clock ids.
-            PERFETTO_DCHECK(trace_timestamp.clock_id ==
-                            TrackEventInternal::GetClockId());
             auto event_ctx = TrackEventInternal::WriteEvent(
-                ctx.tls_inst_->trace_writer.get(), ctx.GetIncrementalState(),
-                static_category, event_name, type, trace_timestamp.nanoseconds);
-            if (CatTraits::kIsDynamic) {
+                trace_writer, incr_state, static_category, event_name, type,
+                trace_timestamp.nanoseconds);
+            // Write dynamic categories (except for events that don't require
+            // categories). For counter events, the counter name (and optional
+            // category) is stored as part of the track descriptor instead being
+            // recorded with individual events.
+            if (CatTraits::kIsDynamic &&
+                type != protos::pbzero::TrackEvent::TYPE_SLICE_END &&
+                type != protos::pbzero::TrackEvent::TYPE_COUNTER) {
               DynamicCategory dynamic_category =
                   CatTraits::GetDynamicCategory(category);
               Category cat = Category::FromDynamicCategory(dynamic_category);
@@ -624,12 +699,6 @@ class TrackEventDataSource
               event_ctx.event()->set_track_uuid(track.uuid);
             arg_function(std::move(event_ctx));
           }  // event_ctx
-
-          if (track) {
-            TrackEventInternal::WriteTrackDescriptorIfNeeded(
-                track, ctx.tls_inst_->trace_writer.get(),
-                ctx.GetIncrementalState());
-          }
         });
   }
 
