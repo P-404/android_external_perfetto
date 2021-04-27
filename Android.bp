@@ -3658,7 +3658,9 @@ genrule {
     "protos/perfetto/metrics/android/thread_time_in_state_metric.proto",
     "protos/perfetto/metrics/android/unsymbolized_frames.proto",
     "protos/perfetto/metrics/chrome/all_chrome_metrics.proto",
+    "protos/perfetto/metrics/chrome/blink_gc_metric.proto",
     "protos/perfetto/metrics/chrome/frame_times.proto",
+    "protos/perfetto/metrics/chrome/media_metric.proto",
     "protos/perfetto/metrics/chrome/reported_by_page.proto",
     "protos/perfetto/metrics/chrome/scroll_jank.proto",
     "protos/perfetto/metrics/chrome/test_chrome_metric.proto",
@@ -7777,7 +7779,9 @@ genrule {
     "src/trace_processor/metrics/chrome/scroll_jank_cause_get_bitmap.sql",
     "src/trace_processor/metrics/chrome/scroll_jank_cause_queuing_delay.sql",
     "src/trace_processor/metrics/chrome/test_chrome_metric.sql",
+    "src/trace_processor/metrics/experimental/blink_gc_metric.sql",
     "src/trace_processor/metrics/experimental/frame_times.sql",
+    "src/trace_processor/metrics/experimental/media_metric.sql",
     "src/trace_processor/metrics/experimental/reported_by_page.sql",
     "src/trace_processor/metrics/trace_metadata.sql",
     "src/trace_processor/metrics/trace_stats.sql",
@@ -9689,6 +9693,7 @@ cc_binary {
   ],
   required: [
     "libperfetto_android_internal",
+    "mm_events",
     "traced_perf",
     "trigger_perfetto",
   ],
@@ -9909,8 +9914,47 @@ genrule {
     ],
 }
 
+sh_binary {
+    name: "mm_events",
+    src: "tools/mm_events",
+}
+
 package {
     default_applicable_licenses: ["external_perfetto_license"],
+}
+
+python_library {
+    name: "perfetto-trace-processor-python",
+    srcs: [
+        ":perfetto-trace-processor-python-srcs",
+    ],
+    data: [
+        ":perfetto-trace-processor-python-data",
+    ],
+    version: {
+        py2: {
+            enabled: false,
+        },
+        py3: {
+            enabled: true,
+        },
+    },
+    libs: [
+        "libprotobuf-python",
+    ],
+    host_supported: true,
+}
+
+filegroup {
+    name: "perfetto-trace-processor-python-srcs",
+    srcs: ["src/trace_processor/python/perfetto/**/*.py"],
+    path: "src/trace_processor/python",
+}
+
+filegroup {
+    name: "perfetto-trace-processor-python-data",
+    srcs: ["src/trace_processor/python/perfetto/**/*.descriptor*"],
+    path: "src/trace_processor/python",
 }
 
 // Added automatically by a large-scale-change that took the approach of
