@@ -15,6 +15,7 @@
 import {assertExists} from '../base/logging';
 import {DeferredAction} from '../common/actions';
 import {AggregateData} from '../common/aggregation_data';
+import {Args, ArgsTree} from '../common/arg_types';
 import {MetricResult} from '../common/metric_data';
 import {CurrentSearchResults, SearchSummary} from '../common/search_data';
 import {CallsiteInfo, createEmptyState, State} from '../common/state';
@@ -30,8 +31,6 @@ type TrackDataStore = Map<string, {}>;
 type QueryResultsStore = Map<string, {}>;
 type AggregateDataStore = Map<string, AggregateData>;
 type Description = Map<string, string>;
-export type Arg = string|{kind: 'SLICE', trackId: string, sliceId: number};
-export type Args = Map<string, Arg>;
 export interface SliceDetails {
   ts?: number;
   dur?: number;
@@ -47,6 +46,7 @@ export interface SliceDetails {
   category?: string;
   name?: string;
   args?: Args;
+  argsTree?: ArgsTree;
   description?: Description;
 }
 
@@ -399,8 +399,23 @@ class Globals {
     // window span). Therefore, zooming out by six levels is 1.1^6 ~= 2.
     // Similarily, zooming in six levels is 0.9^6 ~= 0.5.
     const pxToSec = this.frontendLocalState.timeScale.deltaPxToDuration(1);
+    // TODO(b/186265930): Remove once fixed:
+    if (!isFinite(pxToSec)) {
+      // Resolution is in pixels per second so 1000 means 1px = 1ms.
+      console.error(`b/186265930: Bad pxToSec suppressed ${pxToSec}`);
+      return fromNs(Math.pow(2, Math.floor(Math.log2(toNs(1000)))));
+    }
     const pxToNs = Math.max(toNs(pxToSec), 1);
-    return fromNs(Math.pow(2, Math.floor(Math.log2(pxToNs))));
+    const resolution = fromNs(Math.pow(2, Math.floor(Math.log2(pxToNs))));
+    const log2 = Math.log2(toNs(resolution));
+    if (log2 % 1 !== 0) {
+      throw new Error(`Resolution should be a power of two.
+        pxToSec: ${pxToSec},
+        pxToNs: ${pxToNs},
+        resolution: ${resolution},
+        log2: ${Math.log2(toNs(resolution))}`);
+    }
+    return resolution;
   }
 
   makeSelection(action: DeferredAction<{}>, tabToOpen = 'current_selection') {

@@ -39,6 +39,7 @@
 #include "perfetto/ext/tracing/ipc/producer_ipc_client.h"
 #include "perfetto/tracing/core/data_source_config.h"
 #include "perfetto/tracing/core/data_source_descriptor.h"
+#include "perfetto/tracing/core/forward_decls.h"
 #include "protos/perfetto/trace/profiling/profile_packet.pbzero.h"
 #include "src/profiling/common/producer_support.h"
 #include "src/profiling/common/profiler_guardrails.h"
@@ -373,7 +374,12 @@ void HeapprofdProducer::WriteRejectedConcurrentSession(BufferID buffer_id,
 
 void HeapprofdProducer::SetupDataSource(DataSourceInstanceID id,
                                         const DataSourceConfig& ds_config) {
-  PERFETTO_DLOG("Setting up data source.");
+  if (ds_config.session_initiator() ==
+      DataSourceConfig::SESSION_INITIATOR_TRUSTED_SYSTEM) {
+    PERFETTO_LOG("Setting up datasource: statsd initiator.");
+  } else {
+    PERFETTO_LOG("Setting up datasource: non-statsd initiator.");
+  }
   if (mode_ == HeapprofdMode::kChild && ds_config.enable_extra_guardrails()) {
     PERFETTO_ELOG("enable_extra_guardrails is not supported on user.");
     return;
@@ -930,7 +936,8 @@ void HeapprofdProducer::HandleClientConnection(
   // In fork mode, right now we check whether the target is not profileable
   // in the client, because we cannot read packages.list there.
   if (mode_ == HeapprofdMode::kCentral &&
-      !CanProfile(data_source->ds_config, new_connection->peer_uid_posix())) {
+      !CanProfile(data_source->ds_config, new_connection->peer_uid_posix(),
+                  data_source->config.target_installed_by())) {
     PERFETTO_ELOG("%d (%s) is not profileable.", process.pid,
                   process.cmdline.c_str());
     return;
