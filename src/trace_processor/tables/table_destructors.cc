@@ -45,7 +45,6 @@ CpuTable::~CpuTable() = default;
 CpuFreqTable::~CpuFreqTable() = default;
 ThreadTable::~ThreadTable() = default;
 ProcessTable::~ProcessTable() = default;
-ClockSnapshotTable::~ClockSnapshotTable() = default;
 
 // profiler_tables.h
 StackProfileMappingTable::~StackProfileMappingTable() = default;

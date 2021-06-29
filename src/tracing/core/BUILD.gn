@@ -61,7 +61,6 @@ source_set("service") {
     "../../../protos/perfetto/trace/perfetto:zero",  # For MetatraceWriter.
     "../../android_stats",
     "../../base",
-    "../../protozero/filtering:message_filter",
   ]
   sources = [
     "metatrace_writer.cc",
@@ -75,8 +74,8 @@ source_set("service") {
   ]
   if (is_android && perfetto_build_with_android) {
     deps += [
-      "../../android_internal:headers",
       "../../android_internal:lazy_library_loader",
+      "../../android_internal:headers",
     ]
   }
 }
